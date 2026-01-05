@@ -1,10 +1,14 @@
 # autobatcher
 
-Drop-in replacement for `AsyncOpenAI` that transparently batches requests using OpenAI's [Batch API](https://platform.openai.com/docs/guides/batch).
+Drop-in replacement for `AsyncOpenAI` that transparently batches requests using
+OpenAI's (or compatible) [Batch
+API](https://platform.openai.com/docs/guides/batch).
 
 ## Why?
 
-OpenAI's Batch API offers 50% cost savings, but requires you to restructure your code around file uploads and polling. **autobatcher** lets you keep your existing async code while getting batch pricing automatically.
+Batch LLM APIs (like OpenAI's) offers 50% cost savings, but requires you to
+restructure your code around file uploads and polling. **autobatcher** lets you
+keep your existing async code while getting batch pricing automatically.
 
 ```python
 # Before: regular async calls (full price)
@@ -103,9 +107,14 @@ async with BatchOpenAI() as client:
 
 ## Limitations
 
-- Only `chat.completions.create` is supported (the main use case for batching)
+- Only `chat.completions.create` is supported for now
 - Batch API has a 24-hour completion window by default
+- No escalations when the completion window elapses
 - Not suitable for real-time/interactive use cases
+- This library is designed or use with the [Doubleword batched
+API](https://docs.doubleword.ai/batches/getting-started-with-batched-api).
+Support for OpenAI's batch API or other compatible APIs is best effort. If you
+experience any issues, please open an issue.
 
 ## License
 
