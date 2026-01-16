@@ -11,7 +11,7 @@ Usage:
     )
 """
 
-from .client import BatchOpenAI
+from .client import BatchOpenAI, ProgressCallback, default_progress_callback, progress_bar_callback
 
 __version__ = "0.1.1"
-__all__ = ["BatchOpenAI"]
+__all__ = ["BatchOpenAI", "ProgressCallback", "default_progress_callback", "progress_bar_callback"]

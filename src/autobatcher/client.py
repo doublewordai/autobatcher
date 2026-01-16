@@ -13,12 +13,28 @@ import io
 import uuid
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import httpx
 from loguru import logger
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
+
+# Progress callback type: (stage, current_step, total_steps, message) -> None
+ProgressCallback = Callable[[str, int, int, str], None]
+
+
+def default_progress_callback(stage: str, current: int, total: int, message: str) -> None:
+    """Default progress callback that prints to console."""
+    print(f"[{current}/{total}] {message}")
+
+
+def progress_bar_callback(stage: str, current: int, total: int, message: str) -> None:
+    """Progress callback that displays a visual progress bar."""
+    percent = int((current / total) * 100)
+    filled = percent // 5
+    bar = "█" * filled + "░" * (20 - filled)
+    print(f"{bar} {percent:3d}% | {message}")
 
 
 @dataclass
@@ -105,6 +121,7 @@ class BatchOpenAI:
         batch_window_seconds: float = 1.0,
         poll_interval_seconds: float = 5.0,
         completion_window: Literal["24h", "1h"] = "24h",
+        on_progress: ProgressCallback | None = progress_bar_callback,
         **openai_kwargs: Any,
     ):
         """
@@ -117,6 +134,8 @@ class BatchOpenAI:
             batch_window_seconds: Submit batch after this many seconds, even if size not reached
             poll_interval_seconds: How often to poll for batch completion
             completion_window: Batch completion window ("24h" or "1h")
+            on_progress: Callback for progress updates. Set to None to disable.
+                         Signature: (stage, current_step, total_steps, message) -> None
             **openai_kwargs: Additional arguments passed to AsyncOpenAI
         """
         self._openai = AsyncOpenAI(
@@ -130,6 +149,7 @@ class BatchOpenAI:
         self._batch_window_seconds = batch_window_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._completion_window = completion_window
+        self._on_progress = on_progress
 
         # HTTP client for raw requests (needed to access response headers for partial results)
         self._http_client = httpx.AsyncClient(
@@ -208,6 +228,11 @@ class BatchOpenAI:
                     req.future.set_exception(e)
             raise
 
+    def _report_progress(self, stage: str, current: int, total: int, message: str) -> None:
+        """Report progress if a callback is configured."""
+        if self._on_progress:
+            self._on_progress(stage, current, total, message)
+
     async def _submit_batch(self) -> None:
         """Submit all pending requests as a batch."""
         if not self._pending:
@@ -223,6 +248,9 @@ class BatchOpenAI:
         requests = self._pending
         self._pending = []
 
+        # Stage 1: Preparing batch
+        self._report_progress("preparing", 1, 4, f"Preparing batch ({len(requests)} requests)...")
+
         # Create JSONL content
         lines = []
         for req in requests:
@@ -236,7 +264,9 @@ class BatchOpenAI:
         content = "\n".join(lines)
 
         try:
-            # Upload the batch file using BytesIO
+            # Stage 2: Uploading file
+            self._report_progress("uploading", 2, 4, "Uploading file...")
+
             file_obj = io.BytesIO(content.encode("utf-8"))
             filename = f"batch-{uuid.uuid4()}.jsonl"
 
@@ -246,13 +276,18 @@ class BatchOpenAI:
             )
             logger.debug("Uploaded batch file: {}", file_response.id)
 
-            # Create the batch
+            # Stage 3: Creating batch
+            self._report_progress("creating", 3, 4, "Creating batch...")
+
             batch_response = await self._openai.batches.create(
                 input_file_id=file_response.id,
                 endpoint="/v1/chat/completions",
                 completion_window=self._completion_window,
             )
-            logger.info("Submitted batch {} with {} requests", batch_response.id, len(requests))
+            logger.debug("Submitted batch {} with {} requests", batch_response.id, len(requests))
+
+            # Stage 4: Submitted
+            self._report_progress("submitted", 4, 4, f"Submitted ✓ (batch {batch_response.id[:12]}...)")
 
             # Track the active batch
             active_batch = _ActiveBatch(
@@ -305,7 +340,7 @@ class BatchOpenAI:
                     if status.status == "completed":
                         await self._process_completed_batch(batch, status.output_file_id)
                         completed_indices.append(i)
-                        logger.info("Batch {} completed", batch.batch_id)
+                        logger.debug("Batch {} completed", batch.batch_id)
                     elif status.status in ("failed", "expired", "cancelled"):
                         logger.error("Batch {} {}", batch.batch_id, status.status)
                         error = Exception(f"Batch {batch.batch_id} {status.status}")
