@@ -4,9 +4,7 @@ Drop-in replacement for `AsyncOpenAI` that transparently batches requests. This 
  
 ## Why?
 
-Batch LLM APIs offers 50% cost savings, but requires you to
-restructure your code around file uploads and polling. **autobatcher** lets you
-keep your existing async code while getting batch pricing automatically.
+Batch LLM APIs offers 50% cost savings (and specialist inference providers like Doubleword offer 80%+ savings), but these APIs you to restructure your code around file uploads and polling. **autobatcher** lets you keep your existing async code while getting batch pricing automatically.
 
 ```python
 # Before: regular async calls (full price)
