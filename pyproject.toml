@@ -1,6 +1,6 @@
 [project]
 name = "autobatcher"
-version = "0.1.1"
+version = "0.1.2"
 description = "Drop-in AsyncOpenAI replacement that transparently batches requests using the batch API"
 readme = "README.md"
 license = "MIT"
