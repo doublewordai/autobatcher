@@ -47,6 +47,7 @@ async def main():
         batch_size=100,              # submit batch when this many requests queued
         batch_window_seconds=1.0,    # or after this many seconds
         poll_interval_seconds=5.0,   # how often to check for results
+        completion_window="24h" # Batch completion window (`"24h"` or `"1h"`) 
     )
 
     # Use exactly like AsyncOpenAI
