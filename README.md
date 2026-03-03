@@ -24,10 +24,13 @@ response = await client.chat.completions.create(
 
 ## How it works
 
-1. Requests are collected over a configurable time window (default: 1 second)
+1. Requests are collected over a configurable time window (default: 10 seconds)
 2. When the window closes or batch size is reached, requests are submitted as a batch
 3. Results are polled and returned to waiting callers as they complete
-4. Your code sees normal `ChatCompletion` responses
+4. Your code sees normal response objects (`ChatCompletion`, `CreateEmbeddingResponse`, `Response`)
+
+Different request types (chat completions, embeddings, responses) can be mixed
+in a single batch — each result is parsed with the correct type automatically.
 
 ## Installation
 
@@ -37,6 +40,8 @@ pip install autobatcher
 
 ## Usage
 
+### Chat completions
+
 ```python
 import asyncio
 from autobatcher import BatchOpenAI
@@ -44,13 +49,8 @@ from autobatcher import BatchOpenAI
 async def main():
     client = BatchOpenAI(
         api_key="sk-...",  # or set OPENAI_API_KEY env var
-        batch_size=100,              # submit batch when this many requests queued
-        batch_window_seconds=1.0,    # or after this many seconds
-        poll_interval_seconds=5.0,   # how often to check for results
-        completion_window="24h" # Batch completion window (`"24h"` or `"1h"`) 
     )
 
-    # Use exactly like AsyncOpenAI
     response = await client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": "What is 2+2?"}],
@@ -62,13 +62,35 @@ async def main():
 asyncio.run(main())
 ```
 
+### Embeddings
+
+```python
+async def embed(client: BatchOpenAI):
+    response = await client.embeddings.create(
+        model="text-embedding-3-small",
+        input="Hello, world!",
+    )
+    print(response.data[0].embedding[:5])
+```
+
+### Responses API
+
+```python
+async def respond(client: BatchOpenAI):
+    response = await client.responses.create(
+        model="gpt-4o",
+        input="Explain quantum computing in one sentence.",
+    )
+    print(response.output[0].content[0].text)
+```
+
 ### Parallel requests
 
 The real power comes when you have many requests:
 
 ```python
 async def process_many(prompts: list[str]) -> list[str]:
-    client = BatchOpenAI(batch_size=50, batch_window_seconds=2.0)
+    client = BatchOpenAI(batch_size=500, batch_window_seconds=5.0)
 
     async def get_response(prompt: str) -> str:
         response = await client.chat.completions.create(
@@ -84,6 +106,24 @@ async def process_many(prompts: list[str]) -> list[str]:
     return results
 ```
 
+### Mixed batching
+
+Different request types are automatically mixed into the same batch:
+
+```python
+async def mixed(client: BatchOpenAI):
+    chat, embedding = await asyncio.gather(
+        client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Hello!"}],
+        ),
+        client.embeddings.create(
+            model="text-embedding-3-small",
+            input="Hello!",
+        ),
+    )
+```
+
 ### Context manager
 
 ```python
@@ -97,14 +137,21 @@ async with BatchOpenAI() as client:
 |-----------|---------|-------------|
 | `api_key` | `None` | OpenAI API key (falls back to `OPENAI_API_KEY` env var) |
 | `base_url` | `None` | API base URL (for proxies or compatible APIs) |
-| `batch_size` | `100` | Submit batch when this many requests are queued |
-| `batch_window_seconds` | `1.0` | Submit batch after this many seconds |
+| `batch_size` | `1000` | Submit batch when this many requests are queued |
+| `batch_window_seconds` | `10.0` | Submit batch after this many seconds |
 | `poll_interval_seconds` | `5.0` | How often to poll for batch completion |
 | `completion_window` | `"24h"` | Batch completion window (`"24h"` or `"1h"`) |
 
+## Supported endpoints
+
+| Endpoint | Method | Return type |
+|----------|--------|-------------|
+| `client.chat.completions.create()` | Chat completions | `ChatCompletion` |
+| `client.embeddings.create()` | Embeddings | `CreateEmbeddingResponse` |
+| `client.responses.create()` | Responses API | `Response` |
+
 ## Limitations
 
-- Only `chat.completions.create` is supported for now
 - Batch API has a 24-hour completion window by default. 1hr SLAs is also offered with Doubleword.
 - No escalations when the completion window elapses
 - Not suitable for real-time/interactive use cases
