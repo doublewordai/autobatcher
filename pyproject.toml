@@ -1,6 +1,6 @@
 [project]
 name = "autobatcher"
-version = "0.1.1"
+version = "0.2.0"
 description = "Drop-in AsyncOpenAI replacement that transparently batches requests using the batch API"
 readme = "README.md"
 license = "MIT"
@@ -22,10 +22,13 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "openai>=1.0.0",
+    "openai>=1.66.0",
     "httpx>=0.25.0",
     "loguru>=0.7.0",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 
 [project.urls]
 Homepage = "https://github.com/doublewordai/autobatcher"
@@ -38,3 +41,15 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/autobatcher"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ty.src]
+# Exclude tests — mock-heavy test code produces many false positives
+# because ty sees through to the real types instead of the mocks.
+exclude = ["tests/"]
+
+[tool.ty.environment]
+python-version = "3.12"
