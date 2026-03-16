@@ -51,9 +51,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ty.src]
-# Exclude tests — mock-heavy test code produces many false positives
-# because ty sees through to the real types instead of the mocks.
-exclude = ["tests/"]
+# Exclude tests (mock-heavy false positives) and serve module (optional aiohttp dep).
+exclude = ["tests/", "src/autobatcher/serve.py", "src/autobatcher/__main__.py"]
 
 [tool.ty.environment]
 python-version = "3.12"
