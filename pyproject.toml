@@ -1,6 +1,6 @@
 [project]
 name = "autobatcher"
-version = "0.2.0"
+version = "0.3.0"
 description = "Drop-in AsyncOpenAI replacement that transparently batches requests using the batch API"
 readme = "README.md"
 license = "MIT"
@@ -28,7 +28,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+serve = ["aiohttp>=3.9.0"]
 test = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+autobatcher = "autobatcher.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/doublewordai/autobatcher"
