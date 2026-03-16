@@ -29,7 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 serve = ["aiohttp>=3.9.0"]
-test = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+test = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-aiohttp>=1.0"]
 
 [project.scripts]
 autobatcher = "autobatcher.__main__:main"
