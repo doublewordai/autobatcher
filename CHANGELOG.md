@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.2.0...autobatcher-v0.3.0) (2026-03-16)
+
+
+### Features
+
+* add serve mode for OpenAI-compatible HTTP proxy ([#10](https://github.com/doublewordai/autobatcher/issues/10)) ([356d4e5](https://github.com/doublewordai/autobatcher/commit/356d4e5ba5bd9460404cf2ddf10369b6c4751da2))
+
 ## [0.2.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.1.1...autobatcher-v0.2.0) (2026-03-03)
 
 
