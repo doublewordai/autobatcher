@@ -22,6 +22,57 @@ from openai.types.chat import ChatCompletion
 from openai.types import CreateEmbeddingResponse
 from openai.types.responses import Response
 
+def _parse_sse_body(raw: str) -> dict[str, Any]:
+    """Parse an SSE-formatted response body into a JSON dict.
+
+    Some providers return batch results in SSE format (data: {...}\\n\\ndata: [DONE]).
+    This extracts the JSON payload from the SSE envelope. If there's a single
+    non-streaming response, it returns that directly. For streamed chunks,
+    it reassembles them into a complete ChatCompletion-like response.
+    """
+    chunks: list[dict[str, Any]] = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.startswith("data: ") and line != "data: [DONE]":
+            try:
+                chunks.append(json.loads(line[6:]))
+            except json.JSONDecodeError:
+                continue
+
+    if not chunks:
+        raise ValueError(f"No valid JSON found in SSE body: {raw[:200]}")
+
+    # Single chunk: likely a complete non-streaming response
+    if len(chunks) == 1:
+        return chunks[0]
+
+    # Multiple chunks: reassemble streamed response
+    # Take the first chunk as base and merge content from subsequent chunks
+    base = chunks[0]
+    content_parts: list[str] = []
+    for chunk in chunks:
+        for choice in chunk.get("choices", []):
+            delta = choice.get("delta", {})
+            if "content" in delta and delta["content"]:
+                content_parts.append(delta["content"])
+
+    # Build a complete response from the base
+    if "choices" in base and base["choices"]:
+        base["choices"][0].pop("delta", None)
+        base["choices"][0]["message"] = {
+            "role": "assistant",
+            "content": "".join(content_parts),
+        }
+        base["choices"][0]["finish_reason"] = chunks[-1].get("choices", [{}])[0].get("finish_reason", "stop")
+    # Use usage from the last chunk if available
+    for chunk in reversed(chunks):
+        if "usage" in chunk and chunk["usage"]:
+            base["usage"] = chunk["usage"]
+            break
+
+    return base
+
+
 BatchEndpoint = Literal[
     "/v1/chat/completions",
     "/v1/embeddings",
@@ -301,11 +352,13 @@ class BatchOpenAI:
         # Create JSONL content — each line uses the request's own endpoint
         lines = []
         for req in requests:
+            # Force non-streaming: batch results are polled, not streamed
+            body = {**req.params, "stream": False}
             line = {
                 "custom_id": req.custom_id,
                 "method": "POST",
                 "url": req.endpoint,
-                "body": req.params,
+                "body": body,
             }
             lines.append(json.dumps(line))
         content = "\n".join(lines)
@@ -456,6 +509,10 @@ class BatchOpenAI:
                             )
                         else:
                             response_body = response_data.get("body", {})
+                            # Handle SSE-formatted responses from some providers
+                            # (body is a string like "data: {...}\n\ndata: [DONE]\n\n")
+                            if isinstance(response_body, str):
+                                response_body = _parse_sse_body(response_body)
                             result_type = batch.result_types.get(custom_id, ChatCompletion)
                             parsed = result_type.model_validate(response_body)
                             req.future.set_result(parsed)
