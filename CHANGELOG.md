@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.3.0...autobatcher-v0.3.1) (2026-03-16)
+
+
+### Bug Fixes
+
+* handle streaming requests through batch API ([#12](https://github.com/doublewordai/autobatcher/issues/12)) ([a378759](https://github.com/doublewordai/autobatcher/commit/a37875913032245a0058054d7c57fde9160ed174))
+
 ## [0.3.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.2.0...autobatcher-v0.3.0) (2026-03-16)
 
 
