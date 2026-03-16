@@ -22,6 +22,7 @@ from openai.types.chat import ChatCompletion
 from openai.types import CreateEmbeddingResponse
 from openai.types.responses import Response
 
+
 BatchEndpoint = Literal[
     "/v1/chat/completions",
     "/v1/embeddings",
@@ -301,11 +302,13 @@ class BatchOpenAI:
         # Create JSONL content — each line uses the request's own endpoint
         lines = []
         for req in requests:
+            # Force non-streaming: batch results are polled, not streamed
+            body = {**req.params, "stream": False}
             line = {
                 "custom_id": req.custom_id,
                 "method": "POST",
                 "url": req.endpoint,
-                "body": req.params,
+                "body": body,
             }
             lines.append(json.dumps(line))
         content = "\n".join(lines)
