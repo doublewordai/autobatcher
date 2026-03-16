@@ -1,6 +1,6 @@
 [project]
 name = "autobatcher"
-version = "0.2.0"
+version = "0.3.0"
 description = "Drop-in AsyncOpenAI replacement that transparently batches requests using the batch API"
 readme = "README.md"
 license = "MIT"
@@ -28,7 +28,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+serve = ["aiohttp>=3.9.0"]
+test = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-aiohttp>=1.0"]
+
+[project.scripts]
+autobatcher = "autobatcher.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/doublewordai/autobatcher"
@@ -47,9 +51,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ty.src]
-# Exclude tests — mock-heavy test code produces many false positives
-# because ty sees through to the real types instead of the mocks.
-exclude = ["tests/"]
+# Exclude tests (mock-heavy false positives) and serve module (optional aiohttp dep).
+exclude = ["tests/", "src/autobatcher/serve.py", "src/autobatcher/__main__.py"]
 
 [tool.ty.environment]
 python-version = "3.12"

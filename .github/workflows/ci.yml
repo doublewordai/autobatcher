@@ -20,7 +20,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -e ".[test]" ty
+        run: pip install -e ".[test,serve]" ty
 
       - name: Type check
         run: ty check
