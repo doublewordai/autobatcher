@@ -419,13 +419,14 @@ class BatchOpenAI:
             )
             logger.debug("Uploaded batch file: {}", file_response.id)
 
-            # Create the batch
-            # completion_window cast: we accept "1h" (Doubleword extension) which
-            # the OpenAI SDK doesn't include in its Literal type.
+            # Create the batch.
+            # The openai SDK types `completion_window` as Literal["24h"], but
+            # Doubleword supports a "1h" extension. Suppress the type error;
+            # the runtime accepts both values.
             batch_response = await self._openai.batches.create(
                 input_file_id=file_response.id,
                 endpoint=top_level_endpoint,
-                completion_window=self._completion_window,  # type: ignore[arg-type]
+                completion_window=self._completion_window,  # ty: ignore[invalid-argument-type]
             )
             logger.info("Submitted batch {} with {} requests", batch_response.id, len(requests))
 
