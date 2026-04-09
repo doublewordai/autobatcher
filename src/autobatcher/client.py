@@ -51,6 +51,70 @@ class _PendingRequest(Generic[V]):
     future: asyncio.Future[V]
 
 
+class _RawResponseWrapper(Generic[V]):
+    """Stand-in for the openai SDK's ``LegacyAPIResponse`` for batch results.
+
+    The openai SDK exposes ``client.chat.completions.with_raw_response.create(...)``
+    which returns a wrapper object whose ``.parse()`` method yields the parsed
+    body and whose ``.headers`` / ``.http_response`` expose the underlying HTTP
+    metadata. Consumers like ``langchain-openai`` use this surface
+    unconditionally on their non-streaming async path:
+
+    .. code-block:: python
+
+        raw_response = await self.async_client.with_raw_response.create(**payload)
+        response = raw_response.parse()
+
+    Batch results don't have meaningful per-request HTTP metadata (everything
+    comes back through the batch poll), so ``.headers`` is an empty dict and
+    ``.http_response`` is ``None``. The ``.parse()`` method returns the parsed
+    result that the underlying ``.create()`` already produced.
+    """
+
+    def __init__(self, parsed: V) -> None:
+        self._parsed = parsed
+        self.headers: dict[str, str] = {}
+        self.http_response: Any = None
+
+    def parse(self) -> V:
+        return self._parsed
+
+
+class _ChatCompletionsRawResponse:
+    """``with_raw_response`` accessor for :class:`_ChatCompletions`."""
+
+    def __init__(self, completions: "_ChatCompletions") -> None:
+        self._completions = completions
+
+    async def create(self, **kwargs: Any) -> _RawResponseWrapper[ChatCompletion]:
+        result = await self._completions.create(**kwargs)
+        return _RawResponseWrapper(result)
+
+
+class _EmbeddingsRawResponse:
+    """``with_raw_response`` accessor for :class:`_Embeddings`."""
+
+    def __init__(self, embeddings: "_Embeddings") -> None:
+        self._embeddings = embeddings
+
+    async def create(
+        self, **kwargs: Any
+    ) -> _RawResponseWrapper[CreateEmbeddingResponse]:
+        result = await self._embeddings.create(**kwargs)
+        return _RawResponseWrapper(result)
+
+
+class _ResponsesRawResponse:
+    """``with_raw_response`` accessor for :class:`_Responses`."""
+
+    def __init__(self, responses: "_Responses") -> None:
+        self._responses = responses
+
+    async def create(self, **kwargs: Any) -> _RawResponseWrapper[Response]:
+        result = await self._responses.create(**kwargs)
+        return _RawResponseWrapper(result)
+
+
 @dataclass
 class _ActiveBatch:
     """A batch that has been submitted and is being polled."""
@@ -69,6 +133,18 @@ class _ChatCompletions:
 
     def __init__(self, client: BatchOpenAI):
         self._client = client
+
+    @property
+    def with_raw_response(self) -> _ChatCompletionsRawResponse:
+        """Mimic the openai SDK's ``with_raw_response`` accessor.
+
+        Returns an object whose ``.create()`` awaits the parent ``.create()``
+        and wraps the result in a :class:`_RawResponseWrapper` exposing
+        ``.parse()``, ``.headers``, and ``.http_response``. Required for
+        consumers like ``langchain-openai`` that read response headers via
+        the legacy raw-response surface.
+        """
+        return _ChatCompletionsRawResponse(self)
 
     async def create(
         self,
@@ -102,6 +178,14 @@ class _Embeddings:
     def __init__(self, client: BatchOpenAI):
         self._client = client
 
+    @property
+    def with_raw_response(self) -> _EmbeddingsRawResponse:
+        """Mimic the openai SDK's ``with_raw_response`` accessor.
+
+        See :meth:`_ChatCompletions.with_raw_response` for the rationale.
+        """
+        return _EmbeddingsRawResponse(self)
+
     async def create(
         self,
         *,
@@ -126,6 +210,14 @@ class _Responses:
 
     def __init__(self, client: BatchOpenAI):
         self._client = client
+
+    @property
+    def with_raw_response(self) -> _ResponsesRawResponse:
+        """Mimic the openai SDK's ``with_raw_response`` accessor.
+
+        See :meth:`_ChatCompletions.with_raw_response` for the rationale.
+        """
+        return _ResponsesRawResponse(self)
 
     async def create(
         self,
