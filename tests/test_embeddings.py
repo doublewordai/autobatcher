@@ -47,10 +47,10 @@ class TestEmbeddingsJSONL:
             params={"model": "text-embedding-3-small", "input": "hello world"},
             future=fut,
         )
-        client._pending = [req]
-        await client._submit_batch()
+        client._pending[req.endpoint] = [req]
+        await client._submit_batch(req.endpoint)
 
-        file_tuple = client._openai.files.create.call_args.kwargs["file"]
+        file_tuple = client.files.create.call_args.kwargs["file"]
         content = file_tuple[1].getvalue().decode()
         line = json.loads(content.strip())
 
@@ -64,7 +64,7 @@ class TestEmbeddingsJSONL:
     ) -> None:
         """When all requests are embeddings, top-level endpoint should be /v1/embeddings."""
         file_obj = make_file_object("file-emb")
-        client._openai.files.create.return_value = file_obj
+        client.files.create.return_value = file_obj
 
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
@@ -75,10 +75,10 @@ class TestEmbeddingsJSONL:
             params={"model": "text-embedding-3-small", "input": "test"},
             future=fut,
         )
-        client._pending = [req]
-        await client._submit_batch()
+        client._pending[req.endpoint] = [req]
+        await client._submit_batch(req.endpoint)
 
-        call_kwargs = client._openai.batches.create.call_args.kwargs
+        call_kwargs = client.batches.create.call_args.kwargs
         assert call_kwargs["endpoint"] == "/v1/embeddings"
 
     async def test_embedding_body_with_list_input(self, client: BatchOpenAI) -> None:
@@ -92,10 +92,10 @@ class TestEmbeddingsJSONL:
             params={"model": "text-embedding-3-small", "input": ["hello", "world"]},
             future=fut,
         )
-        client._pending = [req]
-        await client._submit_batch()
+        client._pending[req.endpoint] = [req]
+        await client._submit_batch(req.endpoint)
 
-        file_tuple = client._openai.files.create.call_args.kwargs["file"]
+        file_tuple = client.files.create.call_args.kwargs["file"]
         content = file_tuple[1].getvalue().decode()
         line = json.loads(content.strip())
 

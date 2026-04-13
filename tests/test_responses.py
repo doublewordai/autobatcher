@@ -46,10 +46,10 @@ class TestResponsesJSONL:
             params={"model": "gpt-4o", "input": "What is 2+2?"},
             future=fut,
         )
-        client._pending = [req]
-        await client._submit_batch()
+        client._pending[req.endpoint] = [req]
+        await client._submit_batch(req.endpoint)
 
-        file_tuple = client._openai.files.create.call_args.kwargs["file"]
+        file_tuple = client.files.create.call_args.kwargs["file"]
         content = file_tuple[1].getvalue().decode()
         line = json.loads(content.strip())
 
@@ -63,7 +63,7 @@ class TestResponsesJSONL:
     ) -> None:
         """When all requests are responses, top-level endpoint should be /v1/responses."""
         file_obj = make_file_object("file-resp")
-        client._openai.files.create.return_value = file_obj
+        client.files.create.return_value = file_obj
 
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
@@ -74,10 +74,10 @@ class TestResponsesJSONL:
             params={"model": "gpt-4o", "input": "test"},
             future=fut,
         )
-        client._pending = [req]
-        await client._submit_batch()
+        client._pending[req.endpoint] = [req]
+        await client._submit_batch(req.endpoint)
 
-        call_kwargs = client._openai.batches.create.call_args.kwargs
+        call_kwargs = client.batches.create.call_args.kwargs
         assert call_kwargs["endpoint"] == "/v1/responses"
 
     async def test_input_none_omitted_from_params(self, client: BatchOpenAI) -> None:
@@ -96,10 +96,10 @@ class TestResponsesJSONL:
             params=params,
             future=fut,
         )
-        client._pending = [req]
-        await client._submit_batch()
+        client._pending[req.endpoint] = [req]
+        await client._submit_batch(req.endpoint)
 
-        file_tuple = client._openai.files.create.call_args.kwargs["file"]
+        file_tuple = client.files.create.call_args.kwargs["file"]
         content = file_tuple[1].getvalue().decode()
         line = json.loads(content.strip())
 
