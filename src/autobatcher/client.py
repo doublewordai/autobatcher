@@ -62,7 +62,7 @@ class _RawResponseWrapper(Generic[V]):
 
     .. code-block:: python
 
-        raw_response = await self.async_client.with_raw_response.create(**payload)
+        raw_response = await client.chat.completions.with_raw_response.create(**payload)
         response = raw_response.parse()
 
     Batch results don't have meaningful per-request HTTP metadata (everything
