@@ -88,6 +88,20 @@ class TestSubmitBatch:
         assert call_kwargs["endpoint"] == "/v1/chat/completions"
         assert call_kwargs["completion_window"] == "24h"
 
+    async def test_batches_create_passes_through_arbitrary_completion_window(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Nonstandard completion_window values should be passed through unchanged."""
+        file_obj = make_file_object("file-xyz")
+        client._openai.files.create.return_value = file_obj
+        client._completion_window = "72h"
+
+        _add_pending(client, 1)
+        await client._submit_batch()
+
+        call_kwargs = client._openai.batches.create.call_args.kwargs
+        assert call_kwargs["completion_window"] == "72h"
+
     async def test_active_batches_populated(self, client: BatchOpenAI) -> None:
         """After submission, _active_batches should contain the batch with correct request map."""
         batch_resp = make_batch(
