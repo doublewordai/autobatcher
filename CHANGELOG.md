@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.4.0...autobatcher-v0.4.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* **cli:** allow arbitrary completion window strings ([#17](https://github.com/doublewordai/autobatcher/issues/17)) ([20dca1c](https://github.com/doublewordai/autobatcher/commit/20dca1c322bd8d54e1e93d2dd1cb21723463a431))
+
 ## [0.4.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.3.1...autobatcher-v0.4.0) (2026-04-13)
 
 
