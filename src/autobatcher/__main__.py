@@ -33,7 +33,11 @@ def main() -> None:
     serve.add_argument("--batch-size", type=int, default=1000, help="Max requests per batch (default: 1000)")
     serve.add_argument("--batch-window", type=float, default=10.0, help="Batch window in seconds (default: 10)")
     serve.add_argument("--poll-interval", type=float, default=5.0, help="Poll interval in seconds (default: 5)")
-    serve.add_argument("--completion-window", default="24h", choices=["24h", "1h"], help="Batch completion window (default: 24h)")
+    serve.add_argument(
+        "--completion-window",
+        default="24h",
+        help="Batch completion window passed through to the upstream API (default: 24h)",
+    )
 
     args = parser.parse_args()
 

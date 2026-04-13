@@ -271,7 +271,7 @@ class BatchOpenAI:
         batch_size: int = 1000,
         batch_window_seconds: float = 10.0,
         poll_interval_seconds: float = 5.0,
-        completion_window: Literal["24h", "1h"] = "24h",
+        completion_window: str = "24h",
         **openai_kwargs: Any,
     ):
         """
@@ -283,7 +283,7 @@ class BatchOpenAI:
             batch_size: Submit batch when this many requests are queued
             batch_window_seconds: Submit batch after this many seconds, even if size not reached
             poll_interval_seconds: How often to poll for batch completion
-            completion_window: Batch completion window ("24h" or "1h")
+            completion_window: Batch completion window passed through to the upstream API
             **openai_kwargs: Additional arguments passed to AsyncOpenAI
         """
         self._openai = AsyncOpenAI(
@@ -420,9 +420,9 @@ class BatchOpenAI:
             logger.debug("Uploaded batch file: {}", file_response.id)
 
             # Create the batch.
-            # The openai SDK types `completion_window` as Literal["24h"], but
-            # Doubleword supports a "1h" extension. Suppress the type error;
-            # the runtime accepts both values.
+            # The openai SDK types `completion_window` narrowly, but some
+            # OpenAI-compatible providers accept additional values. Pass the
+            # caller-provided string through unchanged.
             batch_response = await self._openai.batches.create(
                 input_file_id=file_response.id,
                 endpoint=top_level_endpoint,
