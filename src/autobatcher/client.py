@@ -16,13 +16,31 @@ import io
 import uuid
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Generic, Literal, Protocol, TypeVar
 
 import httpx
 from loguru import logger
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from openai.types import CreateEmbeddingResponse
+from openai.types.responses import Response
+
+
+BatchEndpoint = Literal[
+    "/v1/chat/completions",
+    "/v1/embeddings",
+    "/v1/responses",
+]
+
+
+class _Validatable(Protocol):
+    """Protocol for pydantic-style model classes with model_validate."""
+
+    @classmethod
+    def model_validate(cls, obj: Any) -> Any: ...
+
+
+V = TypeVar("V", bound=_Validatable)
 
 
 # ---------------------------------------------------------------------------
@@ -41,13 +59,78 @@ BATCH_ENDPOINTS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 @dataclass
-class _PendingRequest:
+class _PendingRequest(Generic[V]):
     """A request waiting to be batched."""
 
     custom_id: str
-    endpoint: str  # e.g. "/v1/chat/completions"
+    endpoint: BatchEndpoint
+    result_type: type[V]
     params: dict[str, Any]
-    future: asyncio.Future[Any]
+    future: asyncio.Future[V]
+
+
+class _RawResponseWrapper(Generic[V]):
+    """Stand-in for the openai SDK's ``LegacyAPIResponse`` for batch results.
+
+    The openai SDK exposes ``client.chat.completions.with_raw_response.create(...)``
+    which returns a wrapper object whose ``.parse()`` method yields the parsed
+    body and whose ``.headers`` / ``.http_response`` expose the underlying HTTP
+    metadata. Consumers like ``langchain-openai`` use this surface
+    unconditionally on their non-streaming async path:
+
+    .. code-block:: python
+
+        raw_response = await client.chat.completions.with_raw_response.create(**payload)
+        response = raw_response.parse()
+
+    Batch results don't have meaningful per-request HTTP metadata (everything
+    comes back through the batch poll), so ``.headers`` is an empty dict and
+    ``.http_response`` is ``None``. The ``.parse()`` method returns the parsed
+    result that the underlying ``.create()`` already produced.
+    """
+
+    def __init__(self, parsed: V) -> None:
+        self._parsed = parsed
+        self.headers: dict[str, str] = {}
+        self.http_response: Any = None
+
+    def parse(self) -> V:
+        return self._parsed
+
+
+class _ChatCompletionsRawResponse:
+    """``with_raw_response`` accessor for :class:`_BatchedChatCompletions`."""
+
+    def __init__(self, completions: _BatchedChatCompletions) -> None:
+        self._completions = completions
+
+    async def create(self, **kwargs: Any) -> _RawResponseWrapper[ChatCompletion]:
+        result = await self._completions.create(**kwargs)
+        return _RawResponseWrapper(result)
+
+
+class _EmbeddingsRawResponse:
+    """``with_raw_response`` accessor for :class:`_BatchedEmbeddings`."""
+
+    def __init__(self, embeddings: _BatchedEmbeddings) -> None:
+        self._embeddings = embeddings
+
+    async def create(
+        self, **kwargs: Any
+    ) -> _RawResponseWrapper[CreateEmbeddingResponse]:
+        result = await self._embeddings.create(**kwargs)
+        return _RawResponseWrapper(result)
+
+
+class _ResponsesRawResponse:
+    """``with_raw_response`` accessor for :class:`_BatchedResponses`."""
+
+    def __init__(self, responses: _BatchedResponses) -> None:
+        self._responses = responses
+
+    async def create(self, **kwargs: Any) -> _RawResponseWrapper[Response]:
+        result = await self._responses.create(**kwargs)
+        return _RawResponseWrapper(result)
 
 
 @dataclass
@@ -58,8 +141,9 @@ class _ActiveBatch:
     endpoint: str
     output_file_id: str
     error_file_id: str
-    requests: dict[str, _PendingRequest]  # custom_id -> request
+    requests: dict[str, _PendingRequest[Any]]  # custom_id -> request
     created_at: float
+    result_types: dict[str, type[_Validatable]] = field(default_factory=dict)  # custom_id -> result type
     last_offset: int = 0  # Track offset for partial result streaming
 
 
@@ -73,6 +157,18 @@ class _BatchedChatCompletions:
     def __init__(self, client: BatchOpenAI):
         self._client = client
 
+    @property
+    def with_raw_response(self) -> _ChatCompletionsRawResponse:
+        """Mimic the openai SDK's ``with_raw_response`` accessor.
+
+        Returns an object whose ``.create()`` awaits the parent ``.create()``
+        and wraps the result in a :class:`_RawResponseWrapper` exposing
+        ``.parse()``, ``.headers``, and ``.http_response``. Required for
+        consumers like ``langchain-openai`` that read response headers via
+        the legacy raw-response surface.
+        """
+        return _ChatCompletionsRawResponse(self)
+
     async def create(
         self,
         *,
@@ -81,10 +177,9 @@ class _BatchedChatCompletions:
         **kwargs: Any,
     ) -> ChatCompletion:
         return await self._client._enqueue_request(
-            endpoint=BATCH_ENDPOINTS["chat_completions"],
-            model=model,
-            messages=messages,
-            **kwargs,
+            endpoint="/v1/chat/completions",
+            result_type=ChatCompletion,
+            params={"model": model, "messages": messages, **kwargs},
         )
 
 
@@ -96,60 +191,72 @@ class _BatchedChat:
 
 
 class _BatchedEmbeddings:
-    """Proxy for embeddings that batches create() calls."""
+    """Proxy for embeddings that batches requests."""
 
     def __init__(self, client: BatchOpenAI):
         self._client = client
 
+    @property
+    def with_raw_response(self) -> _EmbeddingsRawResponse:
+        """Mimic the openai SDK's ``with_raw_response`` accessor.
+
+        See :meth:`_BatchedChatCompletions.with_raw_response` for the rationale.
+        """
+        return _EmbeddingsRawResponse(self)
+
     async def create(
         self,
         *,
+        input: Any,
         model: str,
-        input: str | list[str],
         **kwargs: Any,
     ) -> CreateEmbeddingResponse:
+        """
+        Create embeddings. The request is queued and batched.
+
+        Returns when the batch completes and results are available.
+        """
         return await self._client._enqueue_request(
-            endpoint=BATCH_ENDPOINTS["embeddings"],
-            model=model,
-            input=input,
-            **kwargs,
+            endpoint="/v1/embeddings",
+            result_type=CreateEmbeddingResponse,
+            params={"input": input, "model": model, **kwargs},
         )
 
 
-class _BatchedCompletions:
-    """Proxy for completions that batches create() calls."""
+class _BatchedResponses:
+    """Proxy for responses API that batches requests."""
 
     def __init__(self, client: BatchOpenAI):
         self._client = client
+
+    @property
+    def with_raw_response(self) -> _ResponsesRawResponse:
+        """Mimic the openai SDK's ``with_raw_response`` accessor.
+
+        See :meth:`_BatchedChatCompletions.with_raw_response` for the rationale.
+        """
+        return _ResponsesRawResponse(self)
 
     async def create(
         self,
         *,
         model: str,
-        prompt: str | list[str],
+        input: Any = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Response:
+        """
+        Create a response. The request is queued and batched.
+
+        Returns when the batch completes and results are available.
+        """
+        params: dict[str, Any] = {"model": model, **kwargs}
+        if input is not None:
+            params["input"] = input
         return await self._client._enqueue_request(
-            endpoint=BATCH_ENDPOINTS["completions"],
-            model=model,
-            prompt=prompt,
-            **kwargs,
+            endpoint="/v1/responses",
+            result_type=Response,
+            params=params,
         )
-
-
-# ---------------------------------------------------------------------------
-# Response validators per endpoint
-# ---------------------------------------------------------------------------
-
-def _validate_response(endpoint: str, body: dict[str, Any]) -> Any:
-    """Parse a batch result body into the correct OpenAI response type."""
-    if endpoint == BATCH_ENDPOINTS["chat_completions"]:
-        return ChatCompletion.model_validate(body)
-    elif endpoint == BATCH_ENDPOINTS["embeddings"]:
-        return CreateEmbeddingResponse.model_validate(body)
-    else:
-        # For /v1/completions or unknown endpoints, return raw dict
-        return body
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +277,8 @@ class BatchOpenAI(AsyncOpenAI):
         client = BatchOpenAI(
             api_key="...",
             base_url="https://api.doubleword.ai/v1",
-            batch_size=100,
-            batch_window_seconds=1.0,
+            batch_size=1000,
+            batch_window_seconds=10.0,
         )
 
         # Use exactly like AsyncOpenAI
@@ -195,7 +302,7 @@ class BatchOpenAI(AsyncOpenAI):
         batch_size: int = 1000,
         batch_window_seconds: float = 10.0,
         poll_interval_seconds: float = 5.0,
-        completion_window: Literal["24h", "1h"] = "24h",
+        completion_window: str = "24h",
         **openai_kwargs: Any,
     ):
         """
@@ -207,7 +314,7 @@ class BatchOpenAI(AsyncOpenAI):
             batch_size: Submit batch when this many requests are queued
             batch_window_seconds: Submit batch after this many seconds, even if size not reached
             poll_interval_seconds: How often to poll for batch completion
-            completion_window: Batch completion window ("24h" or "1h")
+            completion_window: Batch completion window passed through to the upstream API
             **openai_kwargs: Additional arguments passed to AsyncOpenAI
         """
         super().__init__(
@@ -238,25 +345,28 @@ class BatchOpenAI(AsyncOpenAI):
         self._active_batches: list[_ActiveBatch] = []
         self._poller_task: asyncio.Task[None] | None = None
 
-        # Override the chat, embeddings, and completions namespaces with batched proxies
+        # Override namespaces with batched proxies (shadows parent's cached_property)
         self.chat = _BatchedChat(self)  # type: ignore[assignment]
         self.embeddings = _BatchedEmbeddings(self)  # type: ignore[assignment]
-        self.completions = _BatchedCompletions(self)  # type: ignore[assignment]
+        self.responses = _BatchedResponses(self)  # type: ignore[assignment]
 
         logger.debug("Initialized with batch_size={}, window={}s", batch_size, batch_window_seconds)
 
     async def _enqueue_request(
         self,
-        endpoint: str,
-        **params: Any,
-    ) -> Any:
+        *,
+        endpoint: BatchEndpoint,
+        result_type: type[V],
+        params: dict[str, Any],
+    ) -> V:
         """Add a request to the pending queue and return when result is ready."""
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[Any] = loop.create_future()
+        future: asyncio.Future[V] = loop.create_future()
 
         request = _PendingRequest(
             custom_id=str(uuid.uuid4()),
             endpoint=endpoint,
+            result_type=result_type,
             params=params,
             future=future,
         )
@@ -316,17 +426,22 @@ class BatchOpenAI(AsyncOpenAI):
         # Take all pending requests
         self._pending[endpoint] = []
 
-        # Create JSONL content
+        # Create JSONL content — each line uses the request's own endpoint
         lines = []
         for req in requests:
+            # Force non-streaming: batch results are polled, not streamed
+            body = {**req.params, "stream": False}
             line = {
                 "custom_id": req.custom_id,
                 "method": "POST",
                 "url": req.endpoint,
-                "body": req.params,
+                "body": body,
             }
             lines.append(json.dumps(line))
         content = "\n".join(lines)
+
+        # Use the first request's endpoint for the top-level batches.create() call
+        top_level_endpoint = requests[0].endpoint
 
         try:
             # Upload the batch file
@@ -339,11 +454,14 @@ class BatchOpenAI(AsyncOpenAI):
             )
             logger.debug("Uploaded batch file: {}", file_response.id)
 
-            # Create the batch
+            # Create the batch.
+            # The openai SDK types `completion_window` narrowly, but some
+            # OpenAI-compatible providers accept additional values. Pass the
+            # caller-provided string through unchanged.
             batch_response = await self.batches.create(
                 input_file_id=file_response.id,
-                endpoint=endpoint,
-                completion_window=self._completion_window,
+                endpoint=top_level_endpoint,
+                completion_window=self._completion_window,  # type: ignore[arg-type]
             )
             logger.info("Submitted batch {} with {} {} requests", batch_response.id, len(requests), endpoint)
 
@@ -355,6 +473,7 @@ class BatchOpenAI(AsyncOpenAI):
                 error_file_id=batch_response.error_file_id or "",
                 requests={req.custom_id: req for req in requests},
                 created_at=time.time(),
+                result_types={req.custom_id: req.result_type for req in requests},
             )
             self._active_batches.append(active_batch)
 
@@ -467,8 +586,9 @@ class BatchOpenAI(AsyncOpenAI):
                             )
                         else:
                             response_body = response_data.get("body", {})
-                            validated = _validate_response(batch.endpoint, response_body)
-                            req.future.set_result(validated)
+                            result_type = batch.result_types.get(custom_id, ChatCompletion)
+                            parsed = result_type.model_validate(response_body)
+                            req.future.set_result(parsed)
                         resolved += 1
 
             # Update offset for next fetch

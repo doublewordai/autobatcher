@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.4.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.4.0...autobatcher-v0.4.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* **cli:** allow arbitrary completion window strings ([#17](https://github.com/doublewordai/autobatcher/issues/17)) ([20dca1c](https://github.com/doublewordai/autobatcher/commit/20dca1c322bd8d54e1e93d2dd1cb21723463a431))
+
+## [0.4.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.3.1...autobatcher-v0.4.0) (2026-04-13)
+
+
+### Features
+
+* add with_raw_response support ([7e76bad](https://github.com/doublewordai/autobatcher/commit/7e76bad680ddbccd9f9f2ed1101b407b0b27bf60))
+
+
+### Documentation
+
+* clarify with_raw_response example in _RawResponseWrapper docstring ([57b0cbf](https://github.com/doublewordai/autobatcher/commit/57b0cbfa5930b89f490389eaa4c7c36e10713f52))
+
+## [0.3.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.3.0...autobatcher-v0.3.1) (2026-03-16)
+
+
+### Bug Fixes
+
+* handle streaming requests through batch API ([#12](https://github.com/doublewordai/autobatcher/issues/12)) ([a378759](https://github.com/doublewordai/autobatcher/commit/a37875913032245a0058054d7c57fde9160ed174))
+
+## [0.3.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.2.0...autobatcher-v0.3.0) (2026-03-16)
+
+
+### Features
+
+* add serve mode for OpenAI-compatible HTTP proxy ([#10](https://github.com/doublewordai/autobatcher/issues/10)) ([356d4e5](https://github.com/doublewordai/autobatcher/commit/356d4e5ba5bd9460404cf2ddf10369b6c4751da2))
+
+## [0.2.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.1.1...autobatcher-v0.2.0) (2026-03-03)
+
+
+### Features
+
+* add embeddings and responses API support, increase defaults ([#9](https://github.com/doublewordai/autobatcher/issues/9)) ([2846e66](https://github.com/doublewordai/autobatcher/commit/2846e66d5679ba14423a23f2ff025f8814028650))
+* commits should produce minor version bumps, not patch bumps. ([f302dea](https://github.com/doublewordai/autobatcher/commit/f302dea622fb6fdc5828d99e6360ed1d3d85f0f2))
+
+
+### Bug Fixes
+
+* remove bump-patch-for-minor-pre-major from release-please config ([f302dea](https://github.com/doublewordai/autobatcher/commit/f302dea622fb6fdc5828d99e6360ed1d3d85f0f2))
+
 ## [0.1.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.1.0...autobatcher-v0.1.1) (2026-01-05)
 
 
