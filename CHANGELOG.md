@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.3.1...autobatcher-v0.4.0) (2026-04-13)
+
+
+### Features
+
+* add with_raw_response support ([7e76bad](https://github.com/doublewordai/autobatcher/commit/7e76bad680ddbccd9f9f2ed1101b407b0b27bf60))
+
+
+### Documentation
+
+* clarify with_raw_response example in _RawResponseWrapper docstring ([57b0cbf](https://github.com/doublewordai/autobatcher/commit/57b0cbfa5930b89f490389eaa4c7c36e10713f52))
+
 ## [0.3.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.3.0...autobatcher-v0.3.1) (2026-03-16)
 
 
