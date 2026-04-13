@@ -345,10 +345,12 @@ class BatchOpenAI(AsyncOpenAI):
         self._active_batches: list[_ActiveBatch] = []
         self._poller_task: asyncio.Task[None] | None = None
 
-        # Override namespaces with batched proxies (shadows parent's cached_property)
-        self.chat = _BatchedChat(self)  # type: ignore[assignment]
-        self.embeddings = _BatchedEmbeddings(self)  # type: ignore[assignment]
-        self.responses = _BatchedResponses(self)  # type: ignore[assignment]
+        # Override namespaces with batched proxies.
+        # Write to __dict__ directly to shadow the parent's cached_property
+        # descriptors without triggering type-checker read-only errors.
+        self.__dict__["chat"] = _BatchedChat(self)
+        self.__dict__["embeddings"] = _BatchedEmbeddings(self)
+        self.__dict__["responses"] = _BatchedResponses(self)
 
         logger.debug("Initialized with batch_size={}, window={}s", batch_size, batch_window_seconds)
 
@@ -461,7 +463,7 @@ class BatchOpenAI(AsyncOpenAI):
             batch_response = await self.batches.create(
                 input_file_id=file_response.id,
                 endpoint=top_level_endpoint,
-                completion_window=self._completion_window,  # type: ignore[arg-type]
+                completion_window=self._completion_window,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             )
             logger.info("Submitted batch {} with {} {} requests", batch_response.id, len(requests), endpoint)
 
