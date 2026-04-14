@@ -1,6 +1,6 @@
 # autobatcher
 
-Drop-in replacement for `AsyncOpenAI` that transparently batches requests. This library is designed or use with the [Doubleword Batch API](https://docs.doubleword.ai/batches/getting-started-with-batched-api). Support for OpenAI's batch API or other compatible APIs is best effort. If you experience any issues, please open an issue.
+Drop-in replacement for `AsyncOpenAI` that transparently batches requests. This library is designed for use with the [Doubleword Batch API](https://docs.doubleword.ai/batches/getting-started-with-batched-api). Support for OpenAI's batch API or other compatible APIs is best effort. If you experience any issues, please open an issue.
  
 ## Why?
 
@@ -131,6 +131,106 @@ async with BatchOpenAI() as client:
     response = await client.chat.completions.create(...)
 ```
 
+## Serve mode
+
+`autobatcher serve` runs a local OpenAI-compatible HTTP proxy. This is useful
+when you want to transparently batch traffic from tools that already support an
+OpenAI-style `base_url`, such as evaluation frameworks, SDK consumers, or local
+benchmark runners.
+
+```bash
+autobatcher serve \
+  --base-url https://api.doubleword.ai/v1 \
+  --api-key "$OPENAI_API_KEY" \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --batch-size 1024 \
+  --batch-window 60 \
+  --poll-interval 10 \
+  --completion-window 24h
+```
+
+Then point your OpenAI-compatible client at the proxy:
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+export OPENAI_API_KEY=dummy
+```
+
+Supported proxy routes:
+
+| Route | Upstream batched endpoint |
+|-------|----------------------------|
+| `/v1/chat/completions` | `/v1/chat/completions` |
+| `/v1/embeddings` | `/v1/embeddings` |
+| `/v1/responses` | `/v1/responses` |
+| `/health` | local healthcheck |
+
+### Batch lifecycle events
+
+In `serve` mode, autobatcher emits structured JSON lines to stdout for batch
+lifecycle events. These are intended for log collection systems such as
+Kubernetes logs, Loki, or Cloud Logging.
+
+Example event:
+
+```json
+{
+  "batch_id": "batch_123",
+  "completion_window": "24h",
+  "endpoint": "/v1/chat/completions",
+  "event": "batch_submitted",
+  "input_file_id": "file_123",
+  "metadata": {
+    "benchmark_id": "bench-2026-04-14",
+    "github_run_id": "24393857047"
+  },
+  "models": ["Qwen/Qwen3.5-397B-A17B-FP8"],
+  "request_count": 872,
+  "source": "autobatcher",
+  "ts": 1776163751.821
+}
+```
+
+Emitted events currently include:
+
+- `batch_submitted`
+- `batch_progress`
+- `batch_completed`
+- `batch_terminal`
+- `batch_cancel_requested`
+- `batch_cancelled_upstream`
+- `batch_cancel_failed`
+- `client_closing`
+
+### Batch metadata
+
+You can stamp correlation metadata onto every upstream batch:
+
+```bash
+autobatcher serve \
+  --base-url https://api.doubleword.ai/v1 \
+  --api-key "$OPENAI_API_KEY" \
+  --batch-metadata benchmark_id=bench-2026-04-14 \
+  --batch-metadata github_run_id=24393857047 \
+  --batch-metadata k8s_job=perf-1234
+```
+
+This metadata is passed through to the upstream `batches.create(...)` call and
+is also included in the emitted lifecycle events.
+
+### Shutdown behavior
+
+By default, `serve` mode best-effort cancels any still-active upstream batches
+when the proxy shuts down. This is useful for short-lived pods or CI jobs where
+the proxy lifetime should own the batch lifetime.
+
+If you want upstream batches to continue running after the proxy exits, use:
+
+```bash
+autobatcher serve --keep-active-batches-on-close
+```
+
 ## Configuration
 
 | Parameter | Default | Description |
@@ -140,7 +240,9 @@ async with BatchOpenAI() as client:
 | `batch_size` | `1000` | Submit batch when this many requests are queued |
 | `batch_window_seconds` | `10.0` | Submit batch after this many seconds |
 | `poll_interval_seconds` | `5.0` | How often to poll for batch completion |
-| `completion_window` | `"24h"` | Batch completion window (`"24h"` or `"1h"`) |
+| `completion_window` | `"24h"` | Batch completion window passed through to the upstream API |
+| `batch_metadata` | `None` | Optional metadata attached to each upstream batch |
+| `cancel_active_batches_on_close` | `False` | Best-effort cancel active upstream batches when closing the client |
 
 ## Supported endpoints
 
