@@ -25,6 +25,48 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from openai.types import CreateEmbeddingResponse
 from openai.types.responses import Response
+from openai import NotGiven
+from openai._types import Omit
+
+# Sentinel types the openai SDK uses for "not provided" parameters.
+# Both are non-JSON-serializable and must be stripped before batching.
+_SENTINEL_TYPES = (NotGiven, Omit)
+
+# Keys that are transport-level client options, not request body fields.
+_TRANSPORT_KEYS = frozenset({
+    "extra_headers", "extra_query", "timeout",
+})
+
+
+def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Prepare request params for batch JSONL serialization.
+
+    Replicates the openai SDK's serialization pipeline:
+    1. Strips NotGiven / Omit sentinel values (matches SDK's is_given() check)
+    2. Merges extra_body into the main body (matches SDK's _build_request())
+    3. Strips transport-level keys (extra_headers, extra_query, timeout)
+
+    All real kwargs (temperature, reasoning_effort, etc.) are preserved.
+    """
+    # Extract and remove extra_body before filtering
+    extra_body = params.get("extra_body")
+
+    # Filter out sentinels, transport keys, and None values
+    cleaned = {
+        k: v
+        for k, v in params.items()
+        if not isinstance(v, _SENTINEL_TYPES)
+        and k not in _TRANSPORT_KEYS
+        and k != "extra_body"
+    }
+
+    # Merge extra_body into the main body (SDK does shallow merge, extra_body wins)
+    if extra_body and isinstance(extra_body, dict):
+        merged = {**cleaned, **extra_body}
+        # Filter out any Omit values in the merged result (matches SDK's _merge_mappings)
+        cleaned = {k: v for k, v in merged.items() if not isinstance(v, Omit)}
+
+    return cleaned
 
 
 BatchEndpoint = Literal[
@@ -471,8 +513,8 @@ class BatchOpenAI(AsyncOpenAI):
         # Create JSONL content — each line uses the request's own endpoint
         lines = []
         for req in requests:
-            # Force non-streaming: batch results are polled, not streamed
-            body = {**req.params, "stream": False}
+            # Clean params for JSONL and force non-streaming
+            body = {**_clean_params(req.params), "stream": False}
             line = {
                 "custom_id": req.custom_id,
                 "method": "POST",
