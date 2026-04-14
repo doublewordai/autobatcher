@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.4.1...autobatcher-v0.5.0) (2026-04-14)
+
+
+### Features
+
+* subclass AsyncOpenAI for compat with MAF ([69a84bf](https://github.com/doublewordai/autobatcher/commit/69a84bf5603f60e2adf7705497edff9adf87c27d))
+* subclass AsyncOpenAI for compat with MAF ([52232a0](https://github.com/doublewordai/autobatcher/commit/52232a0ea34d14c4084547596067661992f6130b))
+
+
+### Bug Fixes
+
+* lint ([829931c](https://github.com/doublewordai/autobatcher/commit/829931cdab61ef93bfe083f064b8ae2fdaf4da8c))
+* tests ([a566c22](https://github.com/doublewordai/autobatcher/commit/a566c227f7dab6acc6acf5c62e78bf9a66f62e3b))
+
 ## [0.4.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.4.0...autobatcher-v0.4.1) (2026-04-13)
 
 
