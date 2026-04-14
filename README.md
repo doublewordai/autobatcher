@@ -141,7 +141,7 @@ benchmark runners.
 ```bash
 autobatcher serve \
   --base-url https://api.doubleword.ai/v1 \
-  --api-key "$OPENAI_API_KEY" \
+  --api-key "$DOUBLEWORD_API_KEY" \
   --host 127.0.0.1 \
   --port 8080 \
   --batch-size 1024 \
@@ -156,6 +156,10 @@ Then point your OpenAI-compatible client at the proxy:
 export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
 export OPENAI_API_KEY=dummy
 ```
+
+Use your real Doubleword credential for the proxy's upstream `--api-key`. The
+downstream client still uses a dummy `OPENAI_API_KEY` because it is only talking
+to the local OpenAI-compatible proxy.
 
 Supported proxy routes:
 
@@ -210,7 +214,7 @@ You can stamp correlation metadata onto every upstream batch:
 ```bash
 autobatcher serve \
   --base-url https://api.doubleword.ai/v1 \
-  --api-key "$OPENAI_API_KEY" \
+  --api-key "$DOUBLEWORD_API_KEY" \
   --batch-metadata benchmark_id=bench-2026-04-14 \
   --batch-metadata github_run_id=24393857047 \
   --batch-metadata k8s_job=perf-1234
