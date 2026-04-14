@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.5.0...autobatcher-v0.6.0) (2026-04-14)
+
+
+### Features
+
+* **serve:** emit structured batch lifecycle events ([#21](https://github.com/doublewordai/autobatcher/issues/21)) ([90cfe52](https://github.com/doublewordai/autobatcher/commit/90cfe522108257c34ef7e6ff1709a4328d176075))
+
 ## [0.5.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.4.1...autobatcher-v0.5.0) (2026-04-14)
 
 
