@@ -41,7 +41,7 @@ class TestPollBatches:
         client._active_batches.append(ab)
 
         # batches.retrieve returns completed status
-        client._openai.batches.retrieve.return_value = make_batch(
+        client.batches.retrieve.return_value = make_batch(
             status="completed", output_file_id="file-out"
         )
 
@@ -71,7 +71,7 @@ class TestPollBatches:
             ab = make_active_batch(["id-1"])
             client._active_batches = [ab]
 
-            client._openai.batches.retrieve.return_value = make_batch(
+            client.batches.retrieve.return_value = make_batch(
                 status=terminal_status
             )
 
@@ -94,7 +94,7 @@ class TestPollBatches:
             make_batch(status="in_progress", output_file_id="file-partial"),
             make_batch(status="completed", output_file_id="file-partial"),
         ]
-        client._openai.batches.retrieve.side_effect = retrieve_responses
+        client.batches.retrieve.side_effect = retrieve_responses
 
         result_line = make_batch_result_line("id-x", "partial-result")
         client._http_client.get = AsyncMock(
@@ -120,7 +120,7 @@ class TestPollBatches:
             make_batch(status="in_progress", output_file_id="file-new"),
             make_batch(status="completed", output_file_id="file-new"),
         ]
-        client._openai.batches.retrieve.side_effect = retrieve_responses
+        client.batches.retrieve.side_effect = retrieve_responses
 
         result_line = make_batch_result_line("id-u", "done")
         client._http_client.get = AsyncMock(
@@ -154,7 +154,7 @@ class TestPollBatches:
                 raise resp
             return resp
 
-        client._openai.batches.retrieve.side_effect = _side_effect
+        client.batches.retrieve.side_effect = _side_effect
 
         result_line = make_batch_result_line("id-e", "recovered")
         client._http_client.get = AsyncMock(

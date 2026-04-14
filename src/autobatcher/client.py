@@ -3,6 +3,9 @@ BatchOpenAI: A drop-in replacement for AsyncOpenAI that uses the batch API.
 
 Collects requests over a time window or until a size threshold, submits them
 as a batch, polls for results, and returns them to waiting callers.
+
+Subclasses AsyncOpenAI so it passes isinstance checks and provides full
+access to non-batched endpoints (models, files, etc.) out of the box.
 """
 
 from __future__ import annotations
@@ -39,6 +42,21 @@ class _Validatable(Protocol):
 
 V = TypeVar("V", bound=_Validatable)
 
+
+# ---------------------------------------------------------------------------
+# Batch endpoint registry
+# ---------------------------------------------------------------------------
+
+BATCH_ENDPOINTS: dict[str, str] = {
+    "chat_completions": "/v1/chat/completions",
+    "embeddings": "/v1/embeddings",
+    "completions": "/v1/completions",
+}
+
+
+# ---------------------------------------------------------------------------
+# Internal data structures
+# ---------------------------------------------------------------------------
 
 @dataclass
 class _PendingRequest(Generic[V]):
@@ -81,9 +99,9 @@ class _RawResponseWrapper(Generic[V]):
 
 
 class _ChatCompletionsRawResponse:
-    """``with_raw_response`` accessor for :class:`_ChatCompletions`."""
+    """``with_raw_response`` accessor for :class:`_BatchedChatCompletions`."""
 
-    def __init__(self, completions: "_ChatCompletions") -> None:
+    def __init__(self, completions: _BatchedChatCompletions) -> None:
         self._completions = completions
 
     async def create(self, **kwargs: Any) -> _RawResponseWrapper[ChatCompletion]:
@@ -92,9 +110,9 @@ class _ChatCompletionsRawResponse:
 
 
 class _EmbeddingsRawResponse:
-    """``with_raw_response`` accessor for :class:`_Embeddings`."""
+    """``with_raw_response`` accessor for :class:`_BatchedEmbeddings`."""
 
-    def __init__(self, embeddings: "_Embeddings") -> None:
+    def __init__(self, embeddings: _BatchedEmbeddings) -> None:
         self._embeddings = embeddings
 
     async def create(
@@ -105,9 +123,9 @@ class _EmbeddingsRawResponse:
 
 
 class _ResponsesRawResponse:
-    """``with_raw_response`` accessor for :class:`_Responses`."""
+    """``with_raw_response`` accessor for :class:`_BatchedResponses`."""
 
-    def __init__(self, responses: "_Responses") -> None:
+    def __init__(self, responses: _BatchedResponses) -> None:
         self._responses = responses
 
     async def create(self, **kwargs: Any) -> _RawResponseWrapper[Response]:
@@ -120,6 +138,7 @@ class _ActiveBatch:
     """A batch that has been submitted and is being polled."""
 
     batch_id: str
+    endpoint: str
     output_file_id: str
     error_file_id: str
     requests: dict[str, _PendingRequest[Any]]  # custom_id -> request
@@ -128,8 +147,12 @@ class _ActiveBatch:
     last_offset: int = 0  # Track offset for partial result streaming
 
 
-class _ChatCompletions:
-    """Proxy for chat.completions that batches requests."""
+# ---------------------------------------------------------------------------
+# Proxy classes that intercept .create() and route to batching
+# ---------------------------------------------------------------------------
+
+class _BatchedChatCompletions:
+    """Proxy for chat.completions that batches create() calls."""
 
     def __init__(self, client: BatchOpenAI):
         self._client = client
@@ -153,11 +176,6 @@ class _ChatCompletions:
         messages: list[dict[str, Any]],
         **kwargs: Any,
     ) -> ChatCompletion:
-        """
-        Create a chat completion. The request is queued and batched.
-
-        Returns when the batch completes and results are available.
-        """
         return await self._client._enqueue_request(
             endpoint="/v1/chat/completions",
             result_type=ChatCompletion,
@@ -165,14 +183,14 @@ class _ChatCompletions:
         )
 
 
-class _Chat:
+class _BatchedChat:
     """Proxy for chat namespace."""
 
     def __init__(self, client: BatchOpenAI):
-        self.completions = _ChatCompletions(client)
+        self.completions = _BatchedChatCompletions(client)
 
 
-class _Embeddings:
+class _BatchedEmbeddings:
     """Proxy for embeddings that batches requests."""
 
     def __init__(self, client: BatchOpenAI):
@@ -182,7 +200,7 @@ class _Embeddings:
     def with_raw_response(self) -> _EmbeddingsRawResponse:
         """Mimic the openai SDK's ``with_raw_response`` accessor.
 
-        See :meth:`_ChatCompletions.with_raw_response` for the rationale.
+        See :meth:`_BatchedChatCompletions.with_raw_response` for the rationale.
         """
         return _EmbeddingsRawResponse(self)
 
@@ -205,7 +223,7 @@ class _Embeddings:
         )
 
 
-class _Responses:
+class _BatchedResponses:
     """Proxy for responses API that batches requests."""
 
     def __init__(self, client: BatchOpenAI):
@@ -215,7 +233,7 @@ class _Responses:
     def with_raw_response(self) -> _ResponsesRawResponse:
         """Mimic the openai SDK's ``with_raw_response`` accessor.
 
-        See :meth:`_ChatCompletions.with_raw_response` for the rationale.
+        See :meth:`_BatchedChatCompletions.with_raw_response` for the rationale.
         """
         return _ResponsesRawResponse(self)
 
@@ -241,12 +259,19 @@ class _Responses:
         )
 
 
-class BatchOpenAI:
+# ---------------------------------------------------------------------------
+# Main client
+# ---------------------------------------------------------------------------
+
+class BatchOpenAI(AsyncOpenAI):
     """
     Drop-in replacement for AsyncOpenAI that uses the batch API.
 
     Requests are collected and submitted as batches based on size and time
     thresholds. Results are polled and returned to waiting callers.
+
+    Subclasses AsyncOpenAI, so it passes isinstance checks and provides
+    full access to non-batched endpoints (models, files, etc.).
 
     Usage:
         client = BatchOpenAI(
@@ -260,6 +285,12 @@ class BatchOpenAI:
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Hello!"}],
+        )
+
+        # Embeddings are also batched
+        embeddings = await client.embeddings.create(
+            model="text-embedding-3-small",
+            input="Hello world",
         )
     """
 
@@ -286,37 +317,40 @@ class BatchOpenAI:
             completion_window: Batch completion window passed through to the upstream API
             **openai_kwargs: Additional arguments passed to AsyncOpenAI
         """
-        self._openai = AsyncOpenAI(
+        super().__init__(
             api_key=api_key,
             base_url=base_url,
             **openai_kwargs,
         )
-        self._base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
-        self._api_key = api_key
+
+        self._api_base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self._api_key_str = api_key
         self._batch_size = batch_size
         self._batch_window_seconds = batch_window_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._completion_window = completion_window
 
-        # HTTP client for raw requests (needed to access response headers for partial results)
+        # HTTP client for raw requests (needed for partial result streaming headers)
         self._http_client = httpx.AsyncClient(
             headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
             timeout=httpx.Timeout(60.0),
         )
 
-        # Request collection
-        self._pending: list[_PendingRequest] = []
+        # Request collection — keyed by endpoint so different types batch separately
+        self._pending: dict[str, list[_PendingRequest]] = {}
         self._pending_lock = asyncio.Lock()
-        self._window_task: asyncio.Task[None] | None = None
+        self._window_tasks: dict[str, asyncio.Task[None]] = {}
 
         # Active batches being polled
         self._active_batches: list[_ActiveBatch] = []
         self._poller_task: asyncio.Task[None] | None = None
 
-        # Public interface matching AsyncOpenAI
-        self.chat = _Chat(self)
-        self.embeddings = _Embeddings(self)
-        self.responses = _Responses(self)
+        # Override namespaces with batched proxies.
+        # Write to __dict__ directly to shadow the parent's cached_property
+        # descriptors without triggering type-checker read-only errors.
+        self.__dict__["chat"] = _BatchedChat(self)
+        self.__dict__["embeddings"] = _BatchedEmbeddings(self)
+        self.__dict__["responses"] = _BatchedResponses(self)
 
         logger.debug("Initialized with batch_size={}, window={}s", batch_size, batch_window_seconds)
 
@@ -340,56 +374,59 @@ class BatchOpenAI:
         )
 
         async with self._pending_lock:
-            self._pending.append(request)
-            pending_count = len(self._pending)
+            if endpoint not in self._pending:
+                self._pending[endpoint] = []
 
-            # Start window timer if this is the first request
+            self._pending[endpoint].append(request)
+            pending_count = len(self._pending[endpoint])
+
+            # Start window timer if this is the first request for this endpoint
             if pending_count == 1:
-                logger.debug("Starting {}s batch window timer", self._batch_window_seconds)
-                self._window_task = asyncio.create_task(
-                    self._window_timer(),
-                    name="batch_window_timer"
+                logger.debug("Starting {}s batch window timer for {}", self._batch_window_seconds, endpoint)
+                self._window_tasks[endpoint] = asyncio.create_task(
+                    self._window_timer(endpoint),
+                    name=f"batch_window_timer_{endpoint}"
                 )
 
             # Check if we've hit the size threshold
             if pending_count >= self._batch_size:
-                logger.debug("Batch size {} reached", self._batch_size)
-                await self._submit_batch()
+                logger.debug("Batch size {} reached for {}", self._batch_size, endpoint)
+                await self._submit_batch(endpoint)
 
         return await future
 
-    async def _window_timer(self) -> None:
+    async def _window_timer(self, endpoint: str) -> None:
         """Timer that triggers batch submission after the window elapses."""
         try:
             await asyncio.sleep(self._batch_window_seconds)
             async with self._pending_lock:
-                if self._pending:
-                    await self._submit_batch()
+                if self._pending.get(endpoint):
+                    await self._submit_batch(endpoint)
         except asyncio.CancelledError:
-            logger.debug("Window timer cancelled")
+            logger.debug("Window timer cancelled for {}", endpoint)
             raise
         except Exception as e:
-            logger.error("Window timer error: {}", e)
-            # Fail all pending futures
-            for req in self._pending:
+            logger.error("Window timer error for {}: {}", endpoint, e)
+            for req in self._pending.get(endpoint, []):
                 if not req.future.done():
                     req.future.set_exception(e)
             raise
 
-    async def _submit_batch(self) -> None:
-        """Submit all pending requests as a batch."""
-        if not self._pending:
+    async def _submit_batch(self, endpoint: str) -> None:
+        """Submit all pending requests for an endpoint as a batch."""
+        requests = self._pending.get(endpoint, [])
+        if not requests:
             return
 
-        # Cancel the window timer if running (but not if we ARE the window timer)
+        # Cancel the window timer if running
         current_task = asyncio.current_task()
-        if self._window_task and not self._window_task.done() and self._window_task is not current_task:
-            self._window_task.cancel()
-        self._window_task = None
+        window_task = self._window_tasks.get(endpoint)
+        if window_task and not window_task.done() and window_task is not current_task:
+            window_task.cancel()
+        self._window_tasks.pop(endpoint, None)
 
         # Take all pending requests
-        requests = self._pending
-        self._pending = []
+        self._pending[endpoint] = []
 
         # Create JSONL content — each line uses the request's own endpoint
         lines = []
@@ -409,11 +446,11 @@ class BatchOpenAI:
         top_level_endpoint = requests[0].endpoint
 
         try:
-            # Upload the batch file using BytesIO
+            # Upload the batch file
             file_obj = io.BytesIO(content.encode("utf-8"))
             filename = f"batch-{uuid.uuid4()}.jsonl"
 
-            file_response = await self._openai.files.create(
+            file_response = await self.files.create(
                 file=(filename, file_obj, "application/jsonl"),
                 purpose="batch",
             )
@@ -423,16 +460,17 @@ class BatchOpenAI:
             # The openai SDK types `completion_window` narrowly, but some
             # OpenAI-compatible providers accept additional values. Pass the
             # caller-provided string through unchanged.
-            batch_response = await self._openai.batches.create(
+            batch_response = await self.batches.create(
                 input_file_id=file_response.id,
                 endpoint=top_level_endpoint,
-                completion_window=self._completion_window,  # ty: ignore[invalid-argument-type]
+                completion_window=self._completion_window,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             )
-            logger.info("Submitted batch {} with {} requests", batch_response.id, len(requests))
+            logger.info("Submitted batch {} with {} {} requests", batch_response.id, len(requests), endpoint)
 
             # Track the active batch
             active_batch = _ActiveBatch(
                 batch_id=batch_response.id,
+                endpoint=endpoint,
                 output_file_id=batch_response.output_file_id or "",
                 error_file_id=batch_response.error_file_id or "",
                 requests={req.custom_id: req for req in requests},
@@ -450,7 +488,6 @@ class BatchOpenAI:
 
         except Exception as e:
             logger.error("Batch submission failed: {}", e)
-            # If batch submission fails, fail all waiting requests
             for req in requests:
                 if not req.future.done():
                     req.future.set_exception(e)
@@ -466,7 +503,7 @@ class BatchOpenAI:
 
             for i, batch in enumerate(self._active_batches):
                 try:
-                    status = await self._openai.batches.retrieve(batch.batch_id)
+                    status = await self.batches.retrieve(batch.batch_id)
                     counts = status.request_counts
                     logger.debug(
                         "Batch {} status: {} (completed={}/{})",
@@ -515,7 +552,7 @@ class BatchOpenAI:
 
         Returns True if there are more results to fetch, False if complete.
         """
-        url = f"{self._base_url}/files/{output_file_id}/content"
+        url = f"{self._api_base_url}/files/{output_file_id}/content"
         if batch.last_offset > 0:
             url = f"{url}?offset={batch.last_offset}"
 
@@ -539,7 +576,6 @@ class BatchOpenAI:
                 result = json.loads(line)
                 custom_id = result.get("custom_id")
 
-                # Handle both success and error responses
                 response_data = result.get("response", {})
                 error_data = result.get("error")
 
@@ -569,7 +605,6 @@ class BatchOpenAI:
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                # File not ready yet, this is normal for early polling
                 return True
             logger.debug("HTTP error fetching partial results: {}", e)
             return True
@@ -590,11 +625,8 @@ class BatchOpenAI:
             return
 
         try:
-            # Fetch any remaining results using the partial results mechanism
-            # This continues from where we left off (using batch.last_offset)
             await self._fetch_partial_results(batch, output_file_id)
 
-            # Handle any requests that didn't get results
             for req in batch.requests.values():
                 if not req.future.done():
                     logger.warning("No result for request {}", req.custom_id)
@@ -610,15 +642,10 @@ class BatchOpenAI:
 
     async def close(self) -> None:
         """Close the client and cancel any pending operations."""
-        if self._window_task and not self._window_task.done():
-            self._window_task.cancel()
+        for task in self._window_tasks.values():
+            if not task.done():
+                task.cancel()
         if self._poller_task and not self._poller_task.done():
             self._poller_task.cancel()
         await self._http_client.aclose()
-        await self._openai.close()
-
-    async def __aenter__(self) -> BatchOpenAI:
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        await self.close()
+        await super().close()

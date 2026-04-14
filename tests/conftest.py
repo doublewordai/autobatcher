@@ -168,25 +168,37 @@ def mock_openai() -> AsyncMock:
 
 @pytest.fixture()
 def client(mock_openai: AsyncMock) -> BatchOpenAI:
-    """BatchOpenAI with mocked internals and fast timers."""
+    """BatchOpenAI with mocked internals and fast timers.
+
+    Uses __new__ to skip AsyncOpenAI.__init__, then wires up the
+    mocked sub-clients and batched proxy classes manually.
+    """
     c = BatchOpenAI.__new__(BatchOpenAI)
-    c._openai = mock_openai
-    c._base_url = "https://api.test.com/v1"
-    c._api_key = "sk-test"
+    # Attributes that replaced the old self._openai composition:
+    # The subclass now uses self.files / self.batches directly,
+    # so we attach the mocks where the real cached_property would live.
+    c.files = mock_openai.files
+    c.batches = mock_openai.batches
+    c._api_base_url = "https://api.test.com/v1"
+    c._api_key_str = "sk-test"
     c._batch_size = 3
     c._batch_window_seconds = 0.05
     c._poll_interval_seconds = 0.05
     c._completion_window = "24h"
     c._http_client = AsyncMock(spec=httpx.AsyncClient)
-    c._pending = []
+    c._pending = {}
     c._pending_lock = asyncio.Lock()
-    c._window_task = None
+    c._window_tasks = {}
     c._active_batches = []
     c._poller_task = None
-    from autobatcher.client import _Chat, _Embeddings, _Responses
-    c.chat = _Chat(c)
-    c.embeddings = _Embeddings(c)
-    c.responses = _Responses(c)
+    # Mock the internal httpx client that AsyncOpenAI.close() would call.
+    # Since we skip __init__ via __new__, this isn't set up automatically.
+    c._client = AsyncMock()
+    c._client.aclose = AsyncMock()
+    from autobatcher.client import _BatchedChat, _BatchedEmbeddings, _BatchedResponses
+    c.chat = _BatchedChat(c)
+    c.embeddings = _BatchedEmbeddings(c)
+    c.responses = _BatchedResponses(c)
     return c
 
 
@@ -214,6 +226,7 @@ def make_active_batch(
         computed_result_types[cid] = rt
     return _ActiveBatch(
         batch_id=batch_id,
+        endpoint="/v1/chat/completions",
         output_file_id=output_file_id,
         error_file_id="",
         requests=requests,

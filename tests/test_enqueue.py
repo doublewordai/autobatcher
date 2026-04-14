@@ -12,6 +12,7 @@ from openai.types.chat import ChatCompletion
 from autobatcher.client import BatchOpenAI
 from tests.conftest import make_batch, make_file_object
 
+EP = "/v1/chat/completions"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -22,39 +23,38 @@ async def _enqueue_one(client: BatchOpenAI, content: str = "hi") -> asyncio.Futu
     loop = asyncio.get_running_loop()
     future = loop.create_future()
 
-    # Manually build a request and append it to _pending so we can inspect
-    # the internal task state without awaiting the future (which blocks until
-    # the batch completes).
     from autobatcher.client import _PendingRequest
     import uuid as _uuid
 
     req = _PendingRequest(
         custom_id=str(_uuid.uuid4()),
-        endpoint="/v1/chat/completions",
+        endpoint=EP,
         result_type=ChatCompletion,
         params={"model": "gpt-4o", "messages": [{"role": "user", "content": content}]},
         future=future,
     )
     async with client._pending_lock:
-        client._pending.append(req)
-        if len(client._pending) == 1:
-            client._window_task = asyncio.create_task(
-                client._window_timer(), name="batch_window_timer"
+        if EP not in client._pending:
+            client._pending[EP] = []
+        client._pending[EP].append(req)
+        if len(client._pending[EP]) == 1:
+            client._window_tasks[EP] = asyncio.create_task(
+                client._window_timer(EP), name="batch_window_timer"
             )
-        if len(client._pending) >= client._batch_size:
-            await client._submit_batch()
+        if len(client._pending[EP]) >= client._batch_size:
+            await client._submit_batch(EP)
     return future
 
 
 class TestEnqueue:
     async def test_single_request_starts_window_timer(self, client: BatchOpenAI) -> None:
         """First enqueued request should start the window timer task."""
-        assert client._window_task is None
+        assert EP not in client._window_tasks
         await _enqueue_one(client)
-        assert client._window_task is not None
-        assert not client._window_task.done()
+        assert EP in client._window_tasks
+        assert not client._window_tasks[EP].done()
         # Cleanup
-        client._window_task.cancel()
+        client._window_tasks[EP].cancel()
 
     async def test_batch_size_triggers_immediate_submit(
         self, client: BatchOpenAI
@@ -65,21 +65,21 @@ class TestEnqueue:
             await _enqueue_one(client)
 
         # files.create should have been called once (batch was submitted)
-        client._openai.files.create.assert_called_once()
-        assert len(client._pending) == 0
+        client.files.create.assert_called_once()
+        assert len(client._pending.get(EP, [])) == 0
 
     async def test_window_timer_fires_for_undersized_batch(
         self, client: BatchOpenAI
     ) -> None:
         """An undersized batch should still be submitted after the window elapses."""
         await _enqueue_one(client)
-        assert len(client._pending) == 1
+        assert len(client._pending.get(EP, [])) == 1
 
         # Await the window timer task directly instead of guessing a sleep duration
-        await asyncio.wait_for(client._window_task, timeout=5.0)
+        await asyncio.wait_for(client._window_tasks[EP], timeout=5.0)
 
-        client._openai.files.create.assert_called_once()
-        assert len(client._pending) == 0
+        client.files.create.assert_called_once()
+        assert len(client._pending.get(EP, [])) == 0
 
         # Cleanup poller started by _submit_batch
         if client._poller_task and not client._poller_task.done():
@@ -97,7 +97,7 @@ class TestEnqueue:
         future = loop.create_future()
         req = _PendingRequest(
             custom_id="test-id-1",
-            endpoint="/v1/chat/completions",
+            endpoint=EP,
             result_type=ChatCompletion,
             params={
                 "model": "gpt-4o-mini",
@@ -107,11 +107,13 @@ class TestEnqueue:
             future=future,
         )
         async with client._pending_lock:
-            client._pending.append(req)
-        await client._submit_batch()
+            if EP not in client._pending:
+                client._pending[EP] = []
+            client._pending[EP].append(req)
+        await client._submit_batch(EP)
 
         # Inspect the JSONL content passed to files.create
-        call_kwargs = client._openai.files.create.call_args
+        call_kwargs = client.files.create.call_args
         file_tuple = call_kwargs.kwargs["file"]
         # file_tuple is (filename, BytesIO, content_type)
         file_bytes = file_tuple[1].getvalue()
@@ -128,7 +130,7 @@ class TestEnqueue:
         # Use the real _enqueue_request but don't await the future
         task = asyncio.create_task(
             client._enqueue_request(
-                endpoint="/v1/chat/completions",
+                endpoint=EP,
                 result_type=ChatCompletion,
                 params={"model": "gpt-4o", "messages": [{"role": "user", "content": "test"}]},
             )
@@ -136,15 +138,15 @@ class TestEnqueue:
         # Yield control so the task enqueues (deterministic, no wall-clock wait)
         await asyncio.sleep(0)
 
-        assert len(client._pending) == 1
-        custom_id = client._pending[0].custom_id
+        assert len(client._pending.get(EP, [])) == 1
+        custom_id = client._pending[EP][0].custom_id
         # Should not raise
         parsed = uuid.UUID(custom_id)
         assert str(parsed) == custom_id
 
         # Cleanup
-        client._window_task.cancel()
-        client._pending[0].future.set_result(None)
+        client._window_tasks[EP].cancel()
+        client._pending[EP][0].future.set_result(None)
         await asyncio.sleep(0)
 
     async def test_concurrent_requests_batched_together(
@@ -159,5 +161,5 @@ class TestEnqueue:
         )
 
         # All should have been submitted in one batch
-        client._openai.files.create.assert_called_once()
-        assert len(client._pending) == 0
+        client.files.create.assert_called_once()
+        assert len(client._pending.get(EP, [])) == 0
