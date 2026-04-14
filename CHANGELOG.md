@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.6.0...autobatcher-v0.6.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* strip non-serializable kwargs ([9a6f94c](https://github.com/doublewordai/autobatcher/commit/9a6f94ca3b9c32acc8bd7c5fe46a518dd221e46c))
+* strip non-serializable kwargs ([1dc0019](https://github.com/doublewordai/autobatcher/commit/1dc0019b808f1441ab5b5f3542096fb822d47402))
+
 ## [0.6.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.5.0...autobatcher-v0.6.0) (2026-04-14)
 
 
