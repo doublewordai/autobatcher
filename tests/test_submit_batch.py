@@ -106,6 +106,21 @@ class TestSubmitBatch:
         call_kwargs = client.batches.create.call_args.kwargs
         assert call_kwargs["completion_window"] == "72h"
 
+    async def test_batches_create_passes_metadata(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Configured batch metadata should be attached to upstream batches."""
+        client._batch_metadata = {"benchmark_id": "bench-123", "suite": "livebench"}
+
+        _add_pending(client, 1)
+        await client._submit_batch(EP)
+
+        call_kwargs = client.batches.create.call_args.kwargs
+        assert call_kwargs["metadata"] == {
+            "benchmark_id": "bench-123",
+            "suite": "livebench",
+        }
+
     async def test_active_batches_populated(self, client: BatchOpenAI) -> None:
         """After submission, _active_batches should contain the batch with correct request map."""
         batch_resp = make_batch(
@@ -121,6 +136,8 @@ class TestSubmitBatch:
         assert len(client._active_batches) == 1
         ab = client._active_batches[0]
         assert ab.batch_id == "batch-999"
+        assert ab.input_file_id == "file-abc123"
+        assert ab.request_count == 2
         assert set(ab.requests.keys()) == {"cid-0", "cid-1"}
 
     async def test_active_batch_has_result_types(self, client: BatchOpenAI) -> None:
@@ -134,6 +151,34 @@ class TestSubmitBatch:
         ab = client._active_batches[0]
         assert ab.result_types["cid-0"] is ChatCompletion
         assert ab.result_types["cid-1"] is ChatCompletion
+
+    async def test_submission_emits_structured_batch_event(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Submission should emit a structured lifecycle event when configured."""
+        events: list[dict] = []
+        client._batch_event_handler = events.append
+        client._batch_metadata = {"benchmark_id": "bench-123"}
+        client.files.create.return_value = make_file_object("file-xyz")
+        client.batches.create.return_value = make_batch(
+            batch_id="batch-evt",
+            status="in_progress",
+            output_file_id="file-out",
+            error_file_id="file-err",
+        )
+
+        _add_pending(client, 2)
+        await client._submit_batch(EP)
+
+        submitted = [event for event in events if event["event"] == "batch_submitted"]
+        assert len(submitted) == 1
+        assert submitted[0]["batch_id"] == "batch-evt"
+        assert submitted[0]["input_file_id"] == "file-xyz"
+        assert submitted[0]["output_file_id"] == "file-out"
+        assert submitted[0]["error_file_id"] == "file-err"
+        assert submitted[0]["request_count"] == 2
+        assert submitted[0]["models"] == ["gpt-4o"]
+        assert submitted[0]["metadata"] == {"benchmark_id": "bench-123"}
 
     async def test_poller_task_started(self, client: BatchOpenAI) -> None:
         """A poller task should be started after a successful submission."""

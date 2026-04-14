@@ -21,6 +21,11 @@ from loguru import logger
 from .client import BatchOpenAI
 
 
+def _stdout_batch_event_handler(event: dict[str, Any]) -> None:
+    """Write structured batch lifecycle events to stdout as JSON lines."""
+    print(json.dumps(event, sort_keys=True), flush=True)
+
+
 def _chat_completion_to_sse(data: dict[str, Any]) -> bytes:
     """Convert a ChatCompletion into SSE bytes (single chunk + [DONE])."""
     chunk = {
@@ -178,6 +183,8 @@ def run_server(
     batch_window_seconds: float = 10.0,
     poll_interval_seconds: float = 5.0,
     completion_window: str = "24h",
+    batch_metadata: dict[str, str] | None = None,
+    cancel_active_batches_on_close: bool = True,
 ) -> None:
     """Start the autobatcher HTTP proxy server."""
     client = BatchOpenAI(
@@ -187,6 +194,9 @@ def run_server(
         batch_window_seconds=batch_window_seconds,
         poll_interval_seconds=poll_interval_seconds,
         completion_window=completion_window,  # type: ignore[arg-type]
+        batch_metadata=batch_metadata,
+        batch_event_handler=_stdout_batch_event_handler,
+        cancel_active_batches_on_close=cancel_active_batches_on_close,
     )
 
     app = create_app(client)

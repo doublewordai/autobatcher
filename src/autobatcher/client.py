@@ -15,6 +15,7 @@ import json
 import io
 import uuid
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, Protocol, TypeVar
 
@@ -41,6 +42,7 @@ class _Validatable(Protocol):
 
 
 V = TypeVar("V", bound=_Validatable)
+BatchEventHandler = Callable[[dict[str, Any]], None]
 
 
 # ---------------------------------------------------------------------------
@@ -139,12 +141,20 @@ class _ActiveBatch:
 
     batch_id: str
     endpoint: str
+    input_file_id: str
     output_file_id: str
     error_file_id: str
+    request_count: int
     requests: dict[str, _PendingRequest[Any]]  # custom_id -> request
     created_at: float
+    models: tuple[str, ...] = ()
+    metadata: dict[str, str] = field(default_factory=dict)
     result_types: dict[str, type[_Validatable]] = field(default_factory=dict)  # custom_id -> result type
     last_offset: int = 0  # Track offset for partial result streaming
+    last_status: str | None = None
+    last_completed_count: int = -1
+    last_failed_count: int = -1
+    last_total_count: int = -1
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +313,9 @@ class BatchOpenAI(AsyncOpenAI):
         batch_window_seconds: float = 10.0,
         poll_interval_seconds: float = 5.0,
         completion_window: str = "24h",
+        batch_metadata: dict[str, str] | None = None,
+        batch_event_handler: BatchEventHandler | None = None,
+        cancel_active_batches_on_close: bool = False,
         **openai_kwargs: Any,
     ):
         """
@@ -315,6 +328,9 @@ class BatchOpenAI(AsyncOpenAI):
             batch_window_seconds: Submit batch after this many seconds, even if size not reached
             poll_interval_seconds: How often to poll for batch completion
             completion_window: Batch completion window passed through to the upstream API
+            batch_metadata: Optional metadata attached to upstream batches
+            batch_event_handler: Optional callback for structured batch lifecycle events
+            cancel_active_batches_on_close: Best-effort cancel for in-flight upstream batches on close()
             **openai_kwargs: Additional arguments passed to AsyncOpenAI
         """
         super().__init__(
@@ -329,6 +345,10 @@ class BatchOpenAI(AsyncOpenAI):
         self._batch_window_seconds = batch_window_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._completion_window = completion_window
+        self._batch_metadata = dict(batch_metadata or {})
+        self._batch_event_handler = batch_event_handler
+        self._cancel_active_batches_on_close = cancel_active_batches_on_close
+        self._closed = False
 
         # HTTP client for raw requests (needed for partial result streaming headers)
         self._http_client = httpx.AsyncClient(
@@ -354,6 +374,23 @@ class BatchOpenAI(AsyncOpenAI):
 
         logger.debug("Initialized with batch_size={}, window={}s", batch_size, batch_window_seconds)
 
+    def _emit_batch_event(self, event: str, **payload: Any) -> None:
+        """Emit a structured batch lifecycle event to the configured handler."""
+        if self._batch_event_handler is None:
+            return
+
+        body = {
+            "source": "autobatcher",
+            "event": event,
+            "ts": time.time(),
+            **payload,
+        }
+
+        try:
+            self._batch_event_handler(body)
+        except Exception as exc:
+            logger.warning("Batch event handler failed for {}: {}", event, exc)
+
     async def _enqueue_request(
         self,
         *,
@@ -362,6 +399,9 @@ class BatchOpenAI(AsyncOpenAI):
         params: dict[str, Any],
     ) -> V:
         """Add a request to the pending queue and return when result is ready."""
+        if self._closed:
+            raise RuntimeError("BatchOpenAI is closed")
+
         loop = asyncio.get_running_loop()
         future: asyncio.Future[V] = loop.create_future()
 
@@ -444,6 +484,9 @@ class BatchOpenAI(AsyncOpenAI):
 
         # Use the first request's endpoint for the top-level batches.create() call
         top_level_endpoint = requests[0].endpoint
+        models = tuple(sorted({
+            model for req in requests for model in [req.params.get("model")] if isinstance(model, str)
+        }))
 
         try:
             # Upload the batch file
@@ -460,24 +503,44 @@ class BatchOpenAI(AsyncOpenAI):
             # The openai SDK types `completion_window` narrowly, but some
             # OpenAI-compatible providers accept additional values. Pass the
             # caller-provided string through unchanged.
-            batch_response = await self.batches.create(
-                input_file_id=file_response.id,
-                endpoint=top_level_endpoint,
-                completion_window=self._completion_window,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
-            )
+            batch_create_kwargs: dict[str, Any] = {
+                "input_file_id": file_response.id,
+                "endpoint": top_level_endpoint,
+                "completion_window": self._completion_window,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+            }
+            if self._batch_metadata:
+                batch_create_kwargs["metadata"] = self._batch_metadata
+
+            batch_response = await self.batches.create(**batch_create_kwargs)
             logger.info("Submitted batch {} with {} {} requests", batch_response.id, len(requests), endpoint)
 
             # Track the active batch
             active_batch = _ActiveBatch(
                 batch_id=batch_response.id,
-                endpoint=endpoint,
+                endpoint=top_level_endpoint,
+                input_file_id=file_response.id,
                 output_file_id=batch_response.output_file_id or "",
                 error_file_id=batch_response.error_file_id or "",
+                request_count=len(requests),
                 requests={req.custom_id: req for req in requests},
                 created_at=time.time(),
+                models=models,
+                metadata=dict(self._batch_metadata),
                 result_types={req.custom_id: req.result_type for req in requests},
             )
             self._active_batches.append(active_batch)
+            self._emit_batch_event(
+                "batch_submitted",
+                batch_id=batch_response.id,
+                endpoint=top_level_endpoint,
+                input_file_id=file_response.id,
+                output_file_id=batch_response.output_file_id,
+                error_file_id=batch_response.error_file_id,
+                request_count=len(requests),
+                models=list(models),
+                completion_window=self._completion_window,
+                metadata=dict(self._batch_metadata),
+            )
 
             # Start the poller if not running
             if self._poller_task is None or self._poller_task.done():
@@ -488,6 +551,15 @@ class BatchOpenAI(AsyncOpenAI):
 
         except Exception as e:
             logger.error("Batch submission failed: {}", e)
+            self._emit_batch_event(
+                "batch_submission_failed",
+                endpoint=top_level_endpoint,
+                request_count=len(requests),
+                models=list(models),
+                completion_window=self._completion_window,
+                metadata=dict(self._batch_metadata),
+                error=str(e),
+            )
             for req in requests:
                 if not req.future.done():
                     req.future.set_exception(e)
@@ -505,21 +577,74 @@ class BatchOpenAI(AsyncOpenAI):
                 try:
                     status = await self.batches.retrieve(batch.batch_id)
                     counts = status.request_counts
+                    completed_count = counts.completed if counts else 0
+                    failed_count = getattr(counts, "failed", 0) if counts else 0
+                    total_count = counts.total if counts else batch.request_count
                     logger.debug(
                         "Batch {} status: {} (completed={}/{})",
                         batch.batch_id[:12], status.status,
-                        counts.completed if counts else 0,
-                        counts.total if counts else 0
+                        completed_count,
+                        total_count
                     )
 
                     # Update output_file_id if it becomes available
                     if status.output_file_id and not batch.output_file_id:
                         batch.output_file_id = status.output_file_id
+                    if status.error_file_id and not batch.error_file_id:
+                        batch.error_file_id = status.error_file_id
+
+                    if (
+                        status.status != batch.last_status
+                        or completed_count != batch.last_completed_count
+                        or failed_count != batch.last_failed_count
+                        or total_count != batch.last_total_count
+                    ):
+                        self._emit_batch_event(
+                            "batch_progress",
+                            batch_id=batch.batch_id,
+                            endpoint=batch.endpoint,
+                            input_file_id=batch.input_file_id,
+                            output_file_id=batch.output_file_id or None,
+                            error_file_id=batch.error_file_id or None,
+                            request_count=batch.request_count,
+                            counts={
+                                "completed": completed_count,
+                                "failed": failed_count,
+                                "total": total_count,
+                            },
+                            status=status.status,
+                            models=list(batch.models),
+                            completion_window=self._completion_window,
+                            metadata=dict(batch.metadata),
+                            elapsed_seconds=round(time.time() - batch.created_at, 3),
+                        )
+                        batch.last_status = status.status
+                        batch.last_completed_count = completed_count
+                        batch.last_failed_count = failed_count
+                        batch.last_total_count = total_count
 
                     if status.status == "completed":
                         await self._process_completed_batch(batch, status.output_file_id)
                         completed_indices.append(i)
                         logger.info("Batch {} completed", batch.batch_id)
+                        self._emit_batch_event(
+                            "batch_completed",
+                            batch_id=batch.batch_id,
+                            endpoint=batch.endpoint,
+                            input_file_id=batch.input_file_id,
+                            output_file_id=batch.output_file_id or None,
+                            error_file_id=batch.error_file_id or None,
+                            request_count=batch.request_count,
+                            counts={
+                                "completed": completed_count,
+                                "failed": failed_count,
+                                "total": total_count,
+                            },
+                            models=list(batch.models),
+                            completion_window=self._completion_window,
+                            metadata=dict(batch.metadata),
+                            elapsed_seconds=round(time.time() - batch.created_at, 3),
+                        )
                     elif status.status in ("failed", "expired", "cancelled"):
                         logger.error("Batch {} {}", batch.batch_id, status.status)
                         error = Exception(f"Batch {batch.batch_id} {status.status}")
@@ -527,6 +652,25 @@ class BatchOpenAI(AsyncOpenAI):
                             if not req.future.done():
                                 req.future.set_exception(error)
                         completed_indices.append(i)
+                        self._emit_batch_event(
+                            "batch_terminal",
+                            batch_id=batch.batch_id,
+                            endpoint=batch.endpoint,
+                            input_file_id=batch.input_file_id,
+                            output_file_id=batch.output_file_id or None,
+                            error_file_id=batch.error_file_id or None,
+                            request_count=batch.request_count,
+                            counts={
+                                "completed": completed_count,
+                                "failed": failed_count,
+                                "total": total_count,
+                            },
+                            status=status.status,
+                            models=list(batch.models),
+                            completion_window=self._completion_window,
+                            metadata=dict(batch.metadata),
+                            elapsed_seconds=round(time.time() - batch.created_at, 3),
+                        )
                     elif status.status in ("in_progress", "validating", "finalizing"):
                         # Fetch partial results if output file is available
                         if batch.output_file_id:
@@ -642,10 +786,81 @@ class BatchOpenAI(AsyncOpenAI):
 
     async def close(self) -> None:
         """Close the client and cancel any pending operations."""
+        if self._closed:
+            return
+        self._closed = True
+
+        pending_count = sum(len(reqs) for reqs in self._pending.values())
+        active_batch_ids = [batch.batch_id for batch in self._active_batches]
+        self._emit_batch_event(
+            "client_closing",
+            pending_request_count=pending_count,
+            active_batch_ids=active_batch_ids,
+            cancel_active_batches_on_close=self._cancel_active_batches_on_close,
+        )
+
         for task in self._window_tasks.values():
             if not task.done():
                 task.cancel()
+        if self._window_tasks:
+            await asyncio.gather(*self._window_tasks.values(), return_exceptions=True)
+        self._window_tasks.clear()
+
         if self._poller_task and not self._poller_task.done():
             self._poller_task.cancel()
+            await asyncio.gather(self._poller_task, return_exceptions=True)
+        self._poller_task = None
+
+        for endpoint, requests in self._pending.items():
+            for req in requests:
+                if not req.future.done():
+                    req.future.set_exception(
+                        RuntimeError(
+                            f"BatchOpenAI closed before pending request on {endpoint} was submitted"
+                        )
+                    )
+        self._pending.clear()
+
+        if self._cancel_active_batches_on_close:
+            for batch in list(self._active_batches):
+                self._emit_batch_event(
+                    "batch_cancel_requested",
+                    batch_id=batch.batch_id,
+                    endpoint=batch.endpoint,
+                    input_file_id=batch.input_file_id,
+                    output_file_id=batch.output_file_id or None,
+                    error_file_id=batch.error_file_id or None,
+                    request_count=batch.request_count,
+                    models=list(batch.models),
+                    completion_window=self._completion_window,
+                    metadata=dict(batch.metadata),
+                )
+                try:
+                    await self.batches.cancel(batch.batch_id)
+                except Exception as exc:
+                    logger.warning("Failed to cancel upstream batch {} during close: {}", batch.batch_id, exc)
+                    self._emit_batch_event(
+                        "batch_cancel_failed",
+                        batch_id=batch.batch_id,
+                        endpoint=batch.endpoint,
+                        error=str(exc),
+                    )
+                else:
+                    self._emit_batch_event(
+                        "batch_cancelled_upstream",
+                        batch_id=batch.batch_id,
+                        endpoint=batch.endpoint,
+                    )
+
+        for batch in self._active_batches:
+            for req in batch.requests.values():
+                if not req.future.done():
+                    req.future.set_exception(
+                        RuntimeError(
+                            f"BatchOpenAI closed before batch {batch.batch_id} completed"
+                        )
+                    )
+        self._active_batches.clear()
+
         await self._http_client.aclose()
         await super().close()

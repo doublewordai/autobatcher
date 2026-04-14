@@ -33,6 +33,45 @@ def _httpx_response(
 
 
 class TestPollBatches:
+    async def test_poll_emits_progress_and_completed_events(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Polling should emit structured progress/completed lifecycle events."""
+        events: list[dict] = []
+        client._batch_event_handler = events.append
+        ab = make_active_batch(["id-a"], batch_id="batch-evt", output_file_id="file-out")
+        client._active_batches.append(ab)
+
+        in_progress = make_batch(status="in_progress", output_file_id="file-out")
+        in_progress.request_counts.completed = 0
+        in_progress.request_counts.failed = 0
+        in_progress.request_counts.total = 1
+
+        completed = make_batch(status="completed", output_file_id="file-out")
+        completed.request_counts.completed = 1
+        completed.request_counts.failed = 0
+        completed.request_counts.total = 1
+
+        client.batches.retrieve.side_effect = [in_progress, completed]
+        client._http_client.get = AsyncMock(
+            return_value=_httpx_response(
+                make_batch_result_line("id-a", "reply-a"),
+                {"X-Incomplete": "false"},
+            )
+        )
+
+        await asyncio.wait_for(client._poll_batches(), timeout=5.0)
+
+        event_names = [event["event"] for event in events]
+        assert event_names == [
+            "batch_progress",
+            "batch_progress",
+            "batch_completed",
+        ]
+        assert events[0]["counts"] == {"completed": 0, "failed": 0, "total": 1}
+        assert events[1]["counts"] == {"completed": 1, "failed": 0, "total": 1}
+        assert events[2]["batch_id"] == "batch-evt"
+
     async def test_completed_batch_resolves_futures(
         self, client: BatchOpenAI
     ) -> None:
