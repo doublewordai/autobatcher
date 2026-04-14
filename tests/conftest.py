@@ -142,6 +142,7 @@ def make_batch(
     obj.error_file_id = error_file_id
     counts = MagicMock()
     counts.completed = 0
+    counts.failed = 0
     counts.total = 0
     obj.request_counts = counts
     return obj
@@ -162,6 +163,7 @@ def mock_openai() -> AsyncMock:
         return_value=make_batch(status="in_progress", output_file_id=None)
     )
     openai.batches.retrieve = AsyncMock(return_value=make_batch())
+    openai.batches.cancel = AsyncMock(return_value=make_batch(status="cancelled"))
     openai.close = AsyncMock()
     return openai
 
@@ -185,6 +187,10 @@ def client(mock_openai: AsyncMock) -> BatchOpenAI:
     c._batch_window_seconds = 0.05
     c._poll_interval_seconds = 0.05
     c._completion_window = "24h"
+    c._batch_metadata = {}
+    c._batch_event_handler = None
+    c._cancel_active_batches_on_close = False
+    c._closed = False
     c._http_client = AsyncMock(spec=httpx.AsyncClient)
     c._pending = {}
     c._pending_lock = asyncio.Lock()
@@ -227,8 +233,10 @@ def make_active_batch(
     return _ActiveBatch(
         batch_id=batch_id,
         endpoint="/v1/chat/completions",
+        input_file_id="file-in",
         output_file_id=output_file_id,
         error_file_id="",
+        request_count=len(custom_ids),
         requests=requests,
         created_at=time.time(),
         result_types=computed_result_types,

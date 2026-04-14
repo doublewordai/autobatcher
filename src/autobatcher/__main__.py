@@ -7,6 +7,22 @@ import os
 import sys
 
 
+def _parse_batch_metadata(items: list[str] | None) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise argparse.ArgumentTypeError(
+                f"Invalid --batch-metadata value {item!r}; expected KEY=VALUE"
+            )
+        key, value = item.split("=", 1)
+        if not key:
+            raise argparse.ArgumentTypeError(
+                f"Invalid --batch-metadata value {item!r}; key must be non-empty"
+            )
+        metadata[key] = value
+    return metadata
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="autobatcher",
@@ -38,6 +54,18 @@ def main() -> None:
         default="24h",
         help="Batch completion window passed through to the upstream API (default: 24h)",
     )
+    serve.add_argument(
+        "--batch-metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable metadata key/value attached to upstream batches",
+    )
+    serve.add_argument(
+        "--keep-active-batches-on-close",
+        action="store_true",
+        help="Do not cancel in-flight upstream batches when the proxy shuts down",
+    )
 
     args = parser.parse_args()
 
@@ -52,6 +80,12 @@ def main() -> None:
 
         from .serve import run_server
 
+        try:
+            batch_metadata = _parse_batch_metadata(args.batch_metadata)
+        except argparse.ArgumentTypeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+
         run_server(
             base_url=args.base_url,
             api_key=args.api_key,
@@ -61,6 +95,8 @@ def main() -> None:
             batch_window_seconds=args.batch_window,
             poll_interval_seconds=args.poll_interval,
             completion_window=args.completion_window,
+            batch_metadata=batch_metadata,
+            cancel_active_batches_on_close=not args.keep_active_batches_on_close,
         )
 
 
