@@ -142,17 +142,19 @@ await close();
 | `batchSize` | `1000` | Submit batch when this many requests are queued |
 | `batchWindowSeconds` | `10` | Submit batch after this many seconds |
 | `pollIntervalSeconds` | `5` | How often to poll for batch completion |
-| `completionWindow` | `"24h"` | Batch completion deadline (see below) |
+| `completionWindow` | `"1h"` | Completion deadline (see below) |
 
 ### Completion window
 
-The `completionWindow` controls the deadline for the batch to finish:
+The `completionWindow` controls the deadline and pricing tier:
 
-- **`"24h"`** (default) — cheapest option. The
-  [Doubleword Inference API](https://docs.doubleword.ai) offers up to 90%
-  savings at this tier. OpenAI offers 50% off with their 24-hour window.
-- **`"1h"`** — faster turnaround, still cheaper than real-time. Supported by
-  the Doubleword Inference API only (OpenAI only supports `"24h"`).
+- **`"1h"`** (default) — async inference. Faster turnaround than batch mode,
+  still significantly cheaper than real-time. Supported by the
+  [Doubleword Inference API](https://docs.doubleword.ai) only.
+- **`"24h"`** — batch inference. Maximum cost savings (up to 90% with the
+  [Doubleword Inference API](https://docs.doubleword.ai), 50% with OpenAI).
+  Use for background jobs like evals, data processing, or bulk extraction
+  where latency doesn't matter. This is the only window OpenAI supports.
 
 ## Supported endpoints
 

@@ -70,22 +70,20 @@ in a single batch — each result is parsed with the correct type automatically.
 | Batch size | `batch_size` | `batchSize` | `1000` | Submit batch when this many requests are queued |
 | Batch window | `batch_window_seconds` | `batchWindowSeconds` | `10.0` | Submit batch after this many seconds |
 | Poll interval | `poll_interval_seconds` | `pollIntervalSeconds` | `5.0` | How often to poll for batch completion |
-| Completion window | `completion_window` | `completionWindow` | `"24h"` | Batch completion deadline (see below) |
+| Completion window | `completion_window` | `completionWindow` | `"1h"` | Completion deadline (see below) |
 | Batch metadata | `batch_metadata` | — | `None` | Optional metadata attached to each batch (Python only) |
 
 ### Completion window
 
-The `completion_window` controls the deadline for the batch to finish:
+The `completion_window` controls the deadline and pricing tier:
 
-- **`"24h"`** (default) — cheapest option. The
-  [Doubleword Inference API](https://docs.doubleword.ai) offers up to 90%
-  savings at this tier. OpenAI offers 50% off with their 24-hour window.
-- **`"1h"`** — faster turnaround, still cheaper than real-time. Supported by
-  the Doubleword Inference API only (OpenAI only supports `"24h"`).
-
-Choose `"1h"` for latency-sensitive batch workloads (e.g. agent fan-out where
-you need results in minutes, not hours). Choose `"24h"` for maximum cost
-savings on background jobs like evals, data processing, or bulk extraction.
+- **`"1h"`** (default) — async inference. Faster turnaround than batch mode,
+  still significantly cheaper than real-time. Supported by the
+  [Doubleword Inference API](https://docs.doubleword.ai) only.
+- **`"24h"`** — batch inference. Maximum cost savings (up to 90% with the
+  [Doubleword Inference API](https://docs.doubleword.ai), 50% with OpenAI).
+  Use for background jobs like evals, data processing, or bulk extraction
+  where latency doesn't matter. This is the only window OpenAI supports.
 
 ## Supported endpoints
 
