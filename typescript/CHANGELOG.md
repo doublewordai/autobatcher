@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.2.0...autobatcher-ts-v0.2.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* polling loop behaviour ([d2e64f4](https://github.com/doublewordai/autobatcher/commit/d2e64f46119cd0f913b065dc8bd012ab1d63d605))
+* polling loop behaviour ([0004617](https://github.com/doublewordai/autobatcher/commit/00046179eff8b4ab6a66ed7cee87d20e9fd2ceb7))
+
 ## [0.2.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.1.0...autobatcher-ts-v0.2.0) (2026-04-16)
 
 
