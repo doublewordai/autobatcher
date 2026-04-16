@@ -1,6 +1,6 @@
 {
   "name": "autobatcher",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Drop-in OpenAI client that transparently batches requests via the Batch API",
   "license": "MIT",
   "type": "module",
