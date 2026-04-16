@@ -1,0 +1,54 @@
+{
+  "name": "autobatcher",
+  "version": "0.1.0",
+  "description": "Drop-in OpenAI client that transparently batches requests via the Batch API",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "bin": {
+    "autobatcher": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "openai": ">=4.0.0 <7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/doublewordai/autobatcher",
+    "directory": "typescript"
+  },
+  "keywords": [
+    "openai",
+    "batch",
+    "autobatcher",
+    "inference",
+    "llm",
+    "ai"
+  ]
+}

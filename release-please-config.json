@@ -1,12 +1,19 @@
 {
   "packages": {
-    ".": {
+    "python": {
       "release-type": "python",
       "package-name": "autobatcher",
+      "component": "autobatcher",
       "bump-minor-pre-major": true,
       "extra-files": [
         "src/autobatcher/__init__.py"
       ]
+    },
+    "typescript": {
+      "release-type": "node",
+      "package-name": "autobatcher",
+      "component": "autobatcher-ts",
+      "bump-minor-pre-major": true
     }
   }
 }
