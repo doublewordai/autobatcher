@@ -20,7 +20,9 @@ import type {
   CreateEmbeddingResponse,
   EmbeddingCreateParams,
 } from "openai/resources/embeddings";
-import { randomUUID } from "node:crypto";
+/** Runtime-agnostic UUID — works in Node, Deno, Bun, and Cloudflare Workers. */
+const uuid = (): string =>
+  (globalThis.crypto as unknown as { randomUUID(): string }).randomUUID();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -168,7 +170,7 @@ export class BatchOpenAI extends OpenAI {
 
     return new Promise<unknown>((resolve, reject) => {
       this._pending.push({
-        customId: randomUUID(),
+        customId: uuid(),
         endpoint,
         body: cleanParams(params),
         resolve,
