@@ -347,7 +347,7 @@ export class BatchOpenAI extends OpenAI {
       const incomplete = res.headers.get("X-Incomplete");
       const lastLine: string | null = res.headers.get("X-Last-Line");
 
-      if (incomplete && lastLine) {
+      if (incomplete === "true" && lastLine) {
         offset = lastLine;
         await sleep(1000);
       } else {
