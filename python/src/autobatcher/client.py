@@ -354,7 +354,7 @@ class BatchOpenAI(AsyncOpenAI):
         batch_size: int = 1000,
         batch_window_seconds: float = 10.0,
         poll_interval_seconds: float = 5.0,
-        completion_window: str = "24h",
+        completion_window: str = "1h",
         batch_metadata: dict[str, str] | None = None,
         batch_event_handler: BatchEventHandler | None = None,
         cancel_active_batches_on_close: bool = False,

@@ -23,7 +23,7 @@ const { values, positionals } = parseArgs({
     "batch-size": { type: "string", default: "1000" },
     "batch-window": { type: "string", default: "10" },
     "poll-interval": { type: "string", default: "5" },
-    "completion-window": { type: "string", default: "24h" },
+    "completion-window": { type: "string", default: "1h" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -45,7 +45,7 @@ Options:
   --batch-size <n>            Max requests per batch (default: 1000)
   --batch-window <seconds>    Batch collection window (default: 10)
   --poll-interval <seconds>   Polling interval (default: 5)
-  --completion-window <window> Batch deadline: "24h" or "1h" (default: 24h)
+  --completion-window <window> "1h" async (default) or "24h" batch inference
   -h, --help                  Show this help
 `.trim());
   process.exit(values.help ? 0 : 1);

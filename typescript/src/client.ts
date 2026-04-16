@@ -35,7 +35,7 @@ export interface BatchOpenAIOptions extends OpenAIClientOptions {
   batchWindowSeconds?: number;
   /** Seconds between poll ticks when waiting for batch completion (default 5). */
   pollIntervalSeconds?: number;
-  /** Completion window for batch jobs: "24h" or "1h" (default "24h"). */
+  /** Completion window: "1h" for async inference (default), "24h" for batch inference. */
   completionWindow?: string;
 }
 
@@ -142,7 +142,7 @@ export class BatchOpenAI extends OpenAI {
     this._batchSize = batchSize ?? 1000;
     this._batchWindowSeconds = batchWindowSeconds ?? 10;
     this._pollIntervalSeconds = pollIntervalSeconds ?? 5;
-    this._completionWindow = completionWindow ?? "24h";
+    this._completionWindow = completionWindow ?? "1h";
 
     // Save references to the parent's real resources before overwriting.
     this._files = this.files;
