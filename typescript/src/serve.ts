@@ -22,11 +22,12 @@ export interface ServeOptions {
   host?: string;
   /** Port to listen on (default 8080). */
   port?: number;
+  /** Scheduling mode: "async" (default) or "batch". */
+  mode?: "async" | "batch";
   /** BatchOpenAI options forwarded to the client. */
   batchSize?: number;
   batchWindowSeconds?: number;
   pollIntervalSeconds?: number;
-  completionWindow?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,10 +82,10 @@ export function serve(options: ServeOptions): {
   const client = new BatchOpenAI({
     apiKey: options.apiKey,
     baseURL: options.baseURL,
+    mode: options.mode,
     batchSize: options.batchSize,
     batchWindowSeconds: options.batchWindowSeconds,
     pollIntervalSeconds: options.pollIntervalSeconds,
-    completionWindow: options.completionWindow,
   });
 
   const host = options.host ?? "127.0.0.1";

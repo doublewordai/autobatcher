@@ -24,8 +24,8 @@ works, and vice versa.
 Specifically:
 
 - **Same constructor parameters** (snake_case in Python, camelCase in TypeScript)
-- **Same defaults** — `batchSize: 1000`, `batchWindowSeconds: 10`,
-  `pollIntervalSeconds: 5`, `completionWindow: "1h"`
+- **Same defaults** — `mode: "async"`, `batchSize: 1000`, `batchWindowSeconds: 10`,
+  `pollIntervalSeconds: 5`
 - **Same batch lifecycle** — queue → JSONL → file upload → batch create → poll → fetch results → resolve
 - **Same partial-result support** — `X-Incomplete` / `X-Last-Line` headers with `?offset=` query param
 - **Same intercepted endpoints** — `chat.completions.create()`, `embeddings.create()`

@@ -351,10 +351,11 @@ class BatchOpenAI(AsyncOpenAI):
         *,
         api_key: str | None = None,
         base_url: str | None = None,
+        mode: str = "async",
         batch_size: int = 1000,
         batch_window_seconds: float = 10.0,
         poll_interval_seconds: float = 5.0,
-        completion_window: str = "1h",
+        completion_window: str | None = None,
         batch_metadata: dict[str, str] | None = None,
         batch_event_handler: BatchEventHandler | None = None,
         cancel_active_batches_on_close: bool = False,
@@ -366,10 +367,11 @@ class BatchOpenAI(AsyncOpenAI):
         Args:
             api_key: API key for the OpenAI-compatible endpoint
             base_url: Base URL for the API (e.g., "https://api.doubleword.ai/v1")
+            mode: Scheduling mode — "async" (default, faster turnaround) or "batch" (max cost savings)
             batch_size: Submit batch when this many requests are queued
             batch_window_seconds: Submit batch after this many seconds, even if size not reached
             poll_interval_seconds: How often to poll for batch completion
-            completion_window: Batch completion window passed through to the upstream API
+            completion_window: Explicit completion window override (prefer ``mode`` instead)
             batch_metadata: Optional metadata attached to upstream batches
             batch_event_handler: Optional callback for structured batch lifecycle events
             cancel_active_batches_on_close: Best-effort cancel for in-flight upstream batches on close()
@@ -386,8 +388,8 @@ class BatchOpenAI(AsyncOpenAI):
         self._batch_size = batch_size
         self._batch_window_seconds = batch_window_seconds
         self._poll_interval_seconds = poll_interval_seconds
-        self._completion_window = completion_window
-        self._batch_metadata = dict(batch_metadata or {})
+        self._completion_window = completion_window or ("24h" if mode == "batch" else "1h")
+        self._batch_metadata = {"scheduling": mode, **dict(batch_metadata or {})}
         self._batch_event_handler = batch_event_handler
         self._cancel_active_batches_on_close = cancel_active_batches_on_close
         self._closed = False

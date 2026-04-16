@@ -29,13 +29,19 @@ const uuid = (): string =>
 // ---------------------------------------------------------------------------
 
 export interface BatchOpenAIOptions extends OpenAIClientOptions {
+  /**
+   * Scheduling mode:
+   * - `"async"` (default) — async inference, faster turnaround (1h completion window)
+   * - `"batch"` — batch inference, maximum cost savings (24h completion window)
+   */
+  mode?: "async" | "batch";
   /** Maximum requests per batch before auto-flush (default 1000). */
   batchSize?: number;
   /** Seconds to wait before flushing a partial batch (default 10). */
   batchWindowSeconds?: number;
   /** Seconds between poll ticks when waiting for batch completion (default 5). */
   pollIntervalSeconds?: number;
-  /** Completion window: "1h" for async inference (default), "24h" for batch inference. */
+  /** @internal Explicit completion window override. Prefer `mode` instead. */
   completionWindow?: string;
 }
 
@@ -124,6 +130,7 @@ export class BatchOpenAI extends OpenAI {
   private readonly _batchWindowSeconds: number;
   private readonly _pollIntervalSeconds: number;
   private readonly _completionWindow: string;
+  private readonly _batchMetadata: Record<string, string>;
 
   private _pending: PendingRequest[] = [];
   private _windowTimer: ReturnType<typeof setTimeout> | null = null;
@@ -136,13 +143,15 @@ export class BatchOpenAI extends OpenAI {
   private readonly _batches: OpenAI["batches"];
 
   constructor(options: BatchOpenAIOptions = {}) {
-    const { batchSize, batchWindowSeconds, pollIntervalSeconds, completionWindow, ...openaiOpts } = options;
+    const { mode, batchSize, batchWindowSeconds, pollIntervalSeconds, completionWindow, ...openaiOpts } = options;
     super(openaiOpts);
 
+    const resolvedMode = mode ?? "async";
     this._batchSize = batchSize ?? 1000;
     this._batchWindowSeconds = batchWindowSeconds ?? 10;
     this._pollIntervalSeconds = pollIntervalSeconds ?? 5;
-    this._completionWindow = completionWindow ?? "1h";
+    this._completionWindow = completionWindow ?? (resolvedMode === "batch" ? "24h" : "1h");
+    this._batchMetadata = { scheduling: resolvedMode };
 
     // Save references to the parent's real resources before overwriting.
     this._files = this.files;
@@ -239,6 +248,7 @@ export class BatchOpenAI extends OpenAI {
         input_file_id: file.id,
         endpoint: batchEndpoint as "/v1/chat/completions",
         completion_window: this._completionWindow as "24h",
+        metadata: this._batchMetadata,
       });
 
       // 4. Poll until terminal state.

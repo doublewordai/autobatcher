@@ -147,7 +147,7 @@ autobatcher serve \
   --batch-size 1024 \
   --batch-window 60 \
   --poll-interval 10 \
-  --completion-window 24h
+  --mode batch
 ```
 
 Then point your OpenAI-compatible client at the proxy:
@@ -241,24 +241,24 @@ autobatcher serve --keep-active-batches-on-close
 |-----------|---------|-------------|
 | `api_key` | `None` | OpenAI API key (falls back to `OPENAI_API_KEY` env var) |
 | `base_url` | `None` | API base URL (for proxies or compatible APIs) |
+| `mode` | `"async"` | Scheduling mode (see below) |
 | `batch_size` | `1000` | Submit batch when this many requests are queued |
 | `batch_window_seconds` | `10.0` | Submit batch after this many seconds |
 | `poll_interval_seconds` | `5.0` | How often to poll for batch completion |
-| `completion_window` | `"1h"` | Completion deadline (see below) |
 | `batch_metadata` | `None` | Optional metadata attached to each upstream batch |
 | `cancel_active_batches_on_close` | `False` | Best-effort cancel active upstream batches when closing the client |
 
-### Completion window
+### Mode
 
-The `completion_window` controls the deadline and pricing tier:
+The `mode` parameter controls scheduling and pricing:
 
-- **`"1h"`** (default) — async inference. Faster turnaround than batch mode,
-  still significantly cheaper than real-time. Supported by the
-  [Doubleword Inference API](https://docs.doubleword.ai) only.
-- **`"24h"`** — batch inference. Maximum cost savings (up to 90% with the
+- **`"async"`** (default) — async inference. Requests are processed as soon as
+  possible with faster turnaround, still significantly cheaper than real-time.
+  Supported by the [Doubleword Inference API](https://docs.doubleword.ai) only.
+- **`"batch"`** — batch inference. Maximum cost savings (up to 90% with the
   [Doubleword Inference API](https://docs.doubleword.ai), 50% with OpenAI).
   Use for background jobs like evals, data processing, or bulk extraction
-  where latency doesn't matter. This is the only window OpenAI supports.
+  where latency doesn't matter. This is the only mode OpenAI supports.
 
 ## Supported endpoints
 
@@ -274,8 +274,8 @@ The `completion_window` controls the deadline and pricing tier:
   from the collection window and polling cycle.
 - Streaming is not supported. Requests that would normally stream are forced to
   non-streaming; the serve proxy can re-wrap results as SSE for consuming clients.
-- OpenAI only supports `completion_window="24h"`. The `"1h"` window is a
-  Doubleword-specific feature.
+- OpenAI only supports `mode="batch"` (24h completion window). Async mode is a
+  [Doubleword Inference API](https://docs.doubleword.ai) feature.
 - No automatic escalation to real-time if the completion window elapses — the
   batch will be marked as expired.
 

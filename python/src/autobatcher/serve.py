@@ -179,10 +179,10 @@ def run_server(
     api_key: str,
     port: int = 8080,
     host: str = "127.0.0.1",
+    mode: str = "async",
     batch_size: int = 1000,
     batch_window_seconds: float = 10.0,
     poll_interval_seconds: float = 5.0,
-    completion_window: str = "24h",
     batch_metadata: dict[str, str] | None = None,
     cancel_active_batches_on_close: bool = True,
 ) -> None:
@@ -190,10 +190,10 @@ def run_server(
     client = BatchOpenAI(
         api_key=api_key,
         base_url=base_url,
+        mode=mode,
         batch_size=batch_size,
         batch_window_seconds=batch_window_seconds,
         poll_interval_seconds=poll_interval_seconds,
-        completion_window=completion_window,  # type: ignore[arg-type]
         batch_metadata=batch_metadata,
         batch_event_handler=_stdout_batch_event_handler,
         cancel_active_batches_on_close=cancel_active_batches_on_close,
