@@ -30,7 +30,7 @@ const client = new BatchOpenAI({
 });
 
 const response = await client.chat.completions.create({
-  model: "Qwen/Qwen3-30B-A3B",
+  model: "Qwen/Qwen3.5-35B-A3B-FP8",
   messages: [{ role: "user", content: "What is 2+2?" }],
 });
 console.log(response.choices[0].message.content);
@@ -59,7 +59,7 @@ const prompts = ["What is 1+1?", "What is 2+2?", "What is 3+3?"];
 const results = await Promise.all(
   prompts.map((prompt) =>
     client.chat.completions.create({
-      model: "Qwen/Qwen3-30B-A3B",
+      model: "Qwen/Qwen3.5-35B-A3B-FP8",
       messages: [{ role: "user", content: prompt }],
     })
   )
