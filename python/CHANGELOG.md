@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.6.1...autobatcher-v0.7.0) (2026-04-16)
+
+
+### Features
+
+* typescript SDK ([7368245](https://github.com/doublewordai/autobatcher/commit/7368245fc95c6b9f1657a2ab09341dd0f03f43a7))
+* typescript SDK ([6a11d37](https://github.com/doublewordai/autobatcher/commit/6a11d37476fc863f6ef8a19d50f8fb5e225f0903))
+
+
+### Bug Fixes
+
+* default async ([c2e905d](https://github.com/doublewordai/autobatcher/commit/c2e905df860ac8ca26a3487d5a1515bff3c9a797))
+* default async over batch ([763a928](https://github.com/doublewordai/autobatcher/commit/763a9280068e4904456bb0844b3dacd70bfcb647))
+
 ## [0.6.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.6.0...autobatcher-v0.6.1) (2026-04-14)
 
 
