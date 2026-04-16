@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.2.1...autobatcher-ts-v0.2.2) (2026-04-16)
+
+
+### Bug Fixes
+
+* model name ([a06b3b8](https://github.com/doublewordai/autobatcher/commit/a06b3b86b1b1f3329f1f89d0feccf17df65da3f5))
+
 ## [0.2.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.2.0...autobatcher-ts-v0.2.1) (2026-04-16)
 
 
