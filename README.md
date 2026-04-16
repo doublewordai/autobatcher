@@ -1,19 +1,32 @@
 # autobatcher
 
-Drop-in replacement for `AsyncOpenAI` that transparently batches requests. This library is designed for use with the [Doubleword Batch API](https://docs.doubleword.ai/batches/getting-started-with-batched-api). Support for OpenAI's batch API or other compatible APIs is best effort. If you experience any issues, please open an issue.
- 
+Drop-in OpenAI client replacement that transparently batches requests via the
+Batch API. Available for [Python](#python) and [TypeScript](#typescript).
+
+This library is designed for use with the [Doubleword Inference API](https://docs.doubleword.ai/inference-api/autobatcher).
+Support for OpenAI's batch API or other compatible APIs is best effort — if you experience any issues, please open an issue.
+
+| Language | Package | Install |
+|----------|---------|---------|
+| Python | [`autobatcher`](https://pypi.org/project/autobatcher/) | `pip install autobatcher` |
+| TypeScript | [`autobatcher`](https://www.npmjs.com/package/autobatcher) | `npm install autobatcher` |
+
 ## Why?
 
-Batch LLM APIs offers 50% cost savings (and specialist inference providers like Doubleword offer 80%+ savings), but these APIs you to restructure your code around file uploads and polling. **autobatcher** lets you keep your existing async code while getting batch pricing automatically.
+Batch APIs offer significant cost savings — up to 90% with the
+[Doubleword Inference API](https://docs.doubleword.ai) (OpenAI offers 50% off
+with their 24-hour batch window) — but they require you to restructure your
+code around file uploads and polling. **autobatcher** lets you keep your
+existing async code while getting batch pricing automatically.
 
 ```python
 # Before: regular async calls (full price)
 from openai import AsyncOpenAI
 client = AsyncOpenAI()
 
-# After: batched calls (50% off)
+# After: batched calls (up to 90% off with Doubleword Inference API)
 from autobatcher import BatchOpenAI
-client = BatchOpenAI()
+client = BatchOpenAI(base_url="https://api.doubleword.ai/v1")
 
 # Same interface, same code
 response = await client.chat.completions.create(
@@ -22,231 +35,57 @@ response = await client.chat.completions.create(
 )
 ```
 
+```typescript
+// Before: regular calls (full price)
+import OpenAI from "openai";
+const client = new OpenAI();
+
+// After: batched calls (up to 90% off with Doubleword Inference API)
+import { BatchOpenAI } from "autobatcher";
+const client = new BatchOpenAI({ baseURL: "https://api.doubleword.ai/v1" });
+
+// Same interface, same code
+const response = await client.chat.completions.create({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "Hello!" }],
+});
+```
+
 ## How it works
 
 1. Requests are collected over a configurable time window (default: 10 seconds)
 2. When the window closes or batch size is reached, requests are submitted as a batch
 3. Results are polled and returned to waiting callers as they complete
-4. Your code sees normal response objects (`ChatCompletion`, `CreateEmbeddingResponse`, `Response`)
+4. Your code sees normal response objects — no API changes needed
 
 Different request types (chat completions, embeddings, responses) can be mixed
 in a single batch — each result is parsed with the correct type automatically.
 
-## Installation
-
-```bash
-pip install autobatcher
-```
-
-## Usage
-
-### Chat completions
-
-```python
-import asyncio
-from autobatcher import BatchOpenAI
-
-async def main():
-    client = BatchOpenAI(
-        api_key="sk-...",  # or set OPENAI_API_KEY env var
-    )
-
-    response = await client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": "What is 2+2?"}],
-    )
-    print(response.choices[0].message.content)
-
-    await client.close()
-
-asyncio.run(main())
-```
-
-### Embeddings
-
-```python
-async def embed(client: BatchOpenAI):
-    response = await client.embeddings.create(
-        model="text-embedding-3-small",
-        input="Hello, world!",
-    )
-    print(response.data[0].embedding[:5])
-```
-
-### Responses API
-
-```python
-async def respond(client: BatchOpenAI):
-    response = await client.responses.create(
-        model="gpt-4o",
-        input="Explain quantum computing in one sentence.",
-    )
-    print(response.output[0].content[0].text)
-```
-
-### Parallel requests
-
-The real power comes when you have many requests:
-
-```python
-async def process_many(prompts: list[str]) -> list[str]:
-    client = BatchOpenAI(batch_size=500, batch_window_seconds=5.0)
-
-    async def get_response(prompt: str) -> str:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.choices[0].message.content
-
-    # All requests are batched together automatically
-    results = await asyncio.gather(*[get_response(p) for p in prompts])
-
-    await client.close()
-    return results
-```
-
-### Mixed batching
-
-Different request types are automatically mixed into the same batch:
-
-```python
-async def mixed(client: BatchOpenAI):
-    chat, embedding = await asyncio.gather(
-        client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "Hello!"}],
-        ),
-        client.embeddings.create(
-            model="text-embedding-3-small",
-            input="Hello!",
-        ),
-    )
-```
-
-### Context manager
-
-```python
-async with BatchOpenAI() as client:
-    response = await client.chat.completions.create(...)
-```
-
-## Serve mode
-
-`autobatcher serve` runs a local OpenAI-compatible HTTP proxy. This is useful
-when you want to transparently batch traffic from tools that already support an
-OpenAI-style `base_url`, such as evaluation frameworks, SDK consumers, or local
-benchmark runners.
-
-```bash
-autobatcher serve \
-  --base-url https://api.doubleword.ai/v1 \
-  --api-key "$DOUBLEWORD_API_KEY" \
-  --host 127.0.0.1 \
-  --port 8080 \
-  --batch-size 1024 \
-  --batch-window 60 \
-  --poll-interval 10 \
-  --completion-window 24h
-```
-
-Then point your OpenAI-compatible client at the proxy:
-
-```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
-export OPENAI_API_KEY=dummy
-```
-
-Use your real Doubleword credential for the proxy's upstream `--api-key`. The
-downstream client still uses a dummy `OPENAI_API_KEY` because it is only talking
-to the local OpenAI-compatible proxy.
-
-Supported proxy routes:
-
-| Route | Upstream batched endpoint |
-|-------|----------------------------|
-| `/v1/chat/completions` | `/v1/chat/completions` |
-| `/v1/embeddings` | `/v1/embeddings` |
-| `/v1/responses` | `/v1/responses` |
-| `/health` | local healthcheck |
-
-### Batch lifecycle events
-
-In `serve` mode, autobatcher emits structured JSON lines to stdout for batch
-lifecycle events. These are intended for log collection systems such as
-Kubernetes logs, Loki, or Cloud Logging.
-
-Example event:
-
-```json
-{
-  "batch_id": "batch_123",
-  "completion_window": "24h",
-  "endpoint": "/v1/chat/completions",
-  "event": "batch_submitted",
-  "input_file_id": "file_123",
-  "metadata": {
-    "benchmark_id": "bench-2026-04-14",
-    "github_run_id": "24393857047"
-  },
-  "models": ["Qwen/Qwen3.5-397B-A17B-FP8"],
-  "request_count": 872,
-  "source": "autobatcher",
-  "ts": 1776163751.821
-}
-```
-
-Emitted events currently include:
-
-- `batch_submitted`
-- `batch_progress`
-- `batch_completed`
-- `batch_terminal`
-- `batch_cancel_requested`
-- `batch_cancelled_upstream`
-- `batch_cancel_failed`
-- `client_closing`
-
-### Batch metadata
-
-You can stamp correlation metadata onto every upstream batch:
-
-```bash
-autobatcher serve \
-  --base-url https://api.doubleword.ai/v1 \
-  --api-key "$DOUBLEWORD_API_KEY" \
-  --batch-metadata benchmark_id=bench-2026-04-14 \
-  --batch-metadata github_run_id=24393857047 \
-  --batch-metadata k8s_job=perf-1234
-```
-
-This metadata is passed through to the upstream `batches.create(...)` call and
-is also included in the emitted lifecycle events.
-
-### Shutdown behavior
-
-By default, `serve` mode best-effort cancels any still-active upstream batches
-when the proxy shuts down. This is useful for short-lived pods or CI jobs where
-the proxy lifetime should own the batch lifetime.
-
-If you want upstream batches to continue running after the proxy exits, use:
-
-```bash
-autobatcher serve --keep-active-batches-on-close
-```
-
 ## Configuration
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `api_key` | `None` | OpenAI API key (falls back to `OPENAI_API_KEY` env var) |
-| `base_url` | `None` | API base URL (for proxies or compatible APIs) |
-| `batch_size` | `1000` | Submit batch when this many requests are queued |
-| `batch_window_seconds` | `10.0` | Submit batch after this many seconds |
-| `poll_interval_seconds` | `5.0` | How often to poll for batch completion |
-| `completion_window` | `"24h"` | Batch completion window passed through to the upstream API |
-| `batch_metadata` | `None` | Optional metadata attached to each upstream batch |
-| `cancel_active_batches_on_close` | `False` | Best-effort cancel active upstream batches when closing the client |
+| Parameter | Python | TypeScript | Default | Description |
+|-----------|--------|------------|---------|-------------|
+| API key | `api_key` | `apiKey` | env var | OpenAI / Doubleword API key |
+| Base URL | `base_url` | `baseURL` | provider default | API base URL |
+| Batch size | `batch_size` | `batchSize` | `1000` | Submit batch when this many requests are queued |
+| Batch window | `batch_window_seconds` | `batchWindowSeconds` | `10.0` | Submit batch after this many seconds |
+| Poll interval | `poll_interval_seconds` | `pollIntervalSeconds` | `5.0` | How often to poll for batch completion |
+| Completion window | `completion_window` | `completionWindow` | `"24h"` | Batch completion deadline (see below) |
+| Batch metadata | `batch_metadata` | — | `None` | Optional metadata attached to each batch (Python only) |
+
+### Completion window
+
+The `completion_window` controls the deadline for the batch to finish:
+
+- **`"24h"`** (default) — cheapest option. The
+  [Doubleword Inference API](https://docs.doubleword.ai) offers up to 90%
+  savings at this tier. OpenAI offers 50% off with their 24-hour window.
+- **`"1h"`** — faster turnaround, still cheaper than real-time. Supported by
+  the Doubleword Inference API only (OpenAI only supports `"24h"`).
+
+Choose `"1h"` for latency-sensitive batch workloads (e.g. agent fan-out where
+you need results in minutes, not hours). Choose `"24h"` for maximum cost
+savings on background jobs like evals, data processing, or bulk extraction.
 
 ## Supported endpoints
 
@@ -256,11 +95,119 @@ autobatcher serve --keep-active-batches-on-close
 | `client.embeddings.create()` | Embeddings | `CreateEmbeddingResponse` |
 | `client.responses.create()` | Responses API | `Response` |
 
+All other methods on the client (e.g. `client.models.list()`,
+`client.files.create()`) pass through to the underlying OpenAI client
+unchanged — only the endpoints above are intercepted for batching.
+
+## Serve mode
+
+Both SDKs include a local OpenAI-compatible HTTP proxy that batches incoming
+requests. Useful for transparently batching traffic from tools that support a
+custom `base_url` — evaluation frameworks, benchmark runners, or any OpenAI SDK
+consumer.
+
+```bash
+# Python
+autobatcher serve \
+  --base-url https://api.doubleword.ai/v1 \
+  --api-key "$DOUBLEWORD_API_KEY" \
+  --port 8080
+
+# TypeScript
+npx autobatcher serve \
+  --base-url https://api.doubleword.ai/v1 \
+  --api-key "$DOUBLEWORD_API_KEY" \
+  --port 8080
+```
+
+Then point any OpenAI-compatible client at the proxy:
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+export OPENAI_API_KEY=dummy
+```
+
+Supported proxy routes:
+
+| Route | Upstream batched endpoint |
+|-------|--------------------------|
+| `POST /v1/chat/completions` | `/v1/chat/completions` |
+| `POST /v1/embeddings` | `/v1/embeddings` |
+| `POST /v1/responses` | `/v1/responses` |
+| `GET /health` | local healthcheck |
+
+The proxy emits structured JSON lifecycle events to stdout for log collection.
+The Python version additionally supports batch metadata stamping and configurable
+shutdown behaviour — see the [Python README](python/README.md) for full details.
+
 ## Limitations
 
-- Batch API has a 24-hour completion window by default. 1hr SLAs is also offered with Doubleword.
-- No escalations when the completion window elapses
-- Not suitable for real-time/interactive use cases
+- Not suitable for real-time or interactive use cases — batch mode adds latency
+  from the collection window and polling cycle.
+- Streaming is not supported. Requests that would normally stream are forced to
+  non-streaming; the proxy can re-wrap results as SSE for consuming clients.
+- OpenAI only supports `completion_window: "24h"`. The `"1h"` window is a
+  Doubleword-specific feature.
+- No automatic escalation to real-time if the completion window elapses — the
+  batch will be marked as expired.
+
+## Python
+
+Full documentation: [`python/README.md`](python/README.md)
+
+```bash
+pip install autobatcher
+```
+
+`BatchOpenAI` is a subclass of `AsyncOpenAI` — it passes `isinstance` checks
+and works anywhere the async client is accepted (LangChain, LlamaIndex,
+PydanticAI, OpenAI Agents SDK, etc.).
+
+```python
+from autobatcher import BatchOpenAI
+
+async with BatchOpenAI(
+    api_key="sk-...",
+    base_url="https://api.doubleword.ai/v1",
+    completion_window="1h",
+) as client:
+    results = await asyncio.gather(*[
+        client.chat.completions.create(
+            model="Qwen/Qwen3-30B-A3B",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        for prompt in prompts
+    ])
+```
+
+## TypeScript
+
+Full documentation: [`typescript/README.md`](typescript/README.md)
+
+```bash
+npm install autobatcher openai
+```
+
+`BatchOpenAI` is a subclass of `OpenAI` — it passes `instanceof` checks and
+works anywhere the standard client is accepted.
+
+```typescript
+import { BatchOpenAI } from "autobatcher";
+
+const client = new BatchOpenAI({
+  apiKey: "sk-...",
+  baseURL: "https://api.doubleword.ai/v1",
+  completionWindow: "1h",
+});
+
+const [a, b, c] = await Promise.all([
+  client.chat.completions.create({ model: "Qwen/Qwen3-30B-A3B", messages: [{ role: "user", content: "What is 1+1?" }] }),
+  client.chat.completions.create({ model: "Qwen/Qwen3-30B-A3B", messages: [{ role: "user", content: "What is 2+2?" }] }),
+  client.chat.completions.create({ model: "Qwen/Qwen3-30B-A3B", messages: [{ role: "user", content: "What is 3+3?" }] }),
+]);
+
+await client.close();
+```
 
 ## License
 
