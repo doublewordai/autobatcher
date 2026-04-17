@@ -20,10 +20,10 @@ const { values, positionals } = parseArgs({
     "api-key": { type: "string" },
     host: { type: "string", default: "127.0.0.1" },
     port: { type: "string", default: "8080" },
+    mode: { type: "string", default: "async" },
     "batch-size": { type: "string", default: "1000" },
     "batch-window": { type: "string", default: "10" },
     "poll-interval": { type: "string", default: "5" },
-    "completion-window": { type: "string", default: "1h" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -42,10 +42,10 @@ Options:
   --api-key <key>             Upstream API key (required)
   --host <host>               Host to bind (default: 127.0.0.1)
   --port <port>               Port to listen on (default: 8080)
+  --mode <mode>               "async" (default) or "batch" scheduling
   --batch-size <n>            Max requests per batch (default: 1000)
   --batch-window <seconds>    Batch collection window (default: 10)
   --poll-interval <seconds>   Polling interval (default: 5)
-  --completion-window <window> "1h" async (default) or "24h" batch inference
   -h, --help                  Show this help
 `.trim());
   process.exit(values.help ? 0 : 1);
@@ -73,10 +73,10 @@ const { close } = serve({
   apiKey,
   host: values.host,
   port: parseInt(values.port!, 10),
+  mode: values.mode as "async" | "batch",
   batchSize: parseInt(values["batch-size"]!, 10),
   batchWindowSeconds: parseInt(values["batch-window"]!, 10),
   pollIntervalSeconds: parseInt(values["poll-interval"]!, 10),
-  completionWindow: values["completion-window"],
 });
 
 // Graceful shutdown

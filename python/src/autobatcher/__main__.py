@@ -50,9 +50,10 @@ def main() -> None:
     serve.add_argument("--batch-window", type=float, default=10.0, help="Batch window in seconds (default: 10)")
     serve.add_argument("--poll-interval", type=float, default=5.0, help="Poll interval in seconds (default: 5)")
     serve.add_argument(
-        "--completion-window",
-        default="1h",
-        help='Completion window: "1h" for async inference (default), "24h" for batch inference',
+        "--mode",
+        default="async",
+        choices=["async", "batch"],
+        help='Scheduling mode: "async" (default, faster) or "batch" (max savings)',
     )
     serve.add_argument(
         "--batch-metadata",
@@ -94,7 +95,7 @@ def main() -> None:
             batch_size=args.batch_size,
             batch_window_seconds=args.batch_window,
             poll_interval_seconds=args.poll_interval,
-            completion_window=args.completion_window,
+            mode=args.mode,
             batch_metadata=batch_metadata,
             cancel_active_batches_on_close=not args.keep_active_batches_on_close,
         )
