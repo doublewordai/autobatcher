@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.2.1...autobatcher-ts-v0.3.0) (2026-04-22)
+
+
+### Features
+
+* retry-after for upload ([58efd04](https://github.com/doublewordai/autobatcher/commit/58efd04c6bdc0fd8cdcb4d6034136d00c0b7fa3b))
+
+
+### Bug Fixes
+
+* model name ([a06b3b8](https://github.com/doublewordai/autobatcher/commit/a06b3b86b1b1f3329f1f89d0feccf17df65da3f5))
+
 ## [0.2.1](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.2.0...autobatcher-ts-v0.2.1) (2026-04-16)
 
 
