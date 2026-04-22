@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, Protocol, TypeVar
 
 import httpx
+import openai
 from loguru import logger
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
@@ -67,6 +68,20 @@ def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
         cleaned = {k: v for k, v in merged.items() if not isinstance(v, Omit)}
 
     return cleaned
+
+
+def _parse_retry_after(headers: httpx.Headers | dict[str, str], default: float = 60.0) -> float:
+    """Extract retry delay in seconds from a Retry-After header.
+
+    Falls back to *default* when the header is missing or unparseable.
+    """
+    raw = headers.get("retry-after") if hasattr(headers, "get") else None
+    if raw is not None:
+        try:
+            return max(float(raw), 1.0)
+        except (ValueError, TypeError):
+            pass
+    return default
 
 
 BatchEndpoint = Literal[
@@ -531,17 +546,28 @@ class BatchOpenAI(AsyncOpenAI):
         }))
 
         try:
-            # Upload the batch file
+            # Upload the batch file (retry on rate limit)
             file_obj = io.BytesIO(content.encode("utf-8"))
             filename = f"batch-{uuid.uuid4()}.jsonl"
 
-            file_response = await self.files.create(
-                file=(filename, file_obj, "application/jsonl"),
-                purpose="batch",
-            )
+            while True:
+                try:
+                    file_response = await self.files.create(
+                        file=(filename, file_obj, "application/jsonl"),
+                        purpose="batch",
+                    )
+                    break
+                except openai.RateLimitError as e:
+                    retry_after = _parse_retry_after(e.response.headers)
+                    logger.info(
+                        "Rate limited uploading batch file, retrying in {}s (Retry-After: {})",
+                        retry_after, e.response.headers.get("retry-after", "not set"),
+                    )
+                    await asyncio.sleep(retry_after)
+                    file_obj.seek(0)
             logger.debug("Uploaded batch file: {}", file_response.id)
 
-            # Create the batch.
+            # Create the batch (retry on rate limit).
             # The openai SDK types `completion_window` narrowly, but some
             # OpenAI-compatible providers accept additional values. Pass the
             # caller-provided string through unchanged.
@@ -553,7 +579,18 @@ class BatchOpenAI(AsyncOpenAI):
             if self._batch_metadata:
                 batch_create_kwargs["metadata"] = self._batch_metadata
 
-            batch_response = await self.batches.create(**batch_create_kwargs)
+            while True:
+                try:
+                    batch_response = await self.batches.create(**batch_create_kwargs)
+                    break
+                except openai.RateLimitError as e:
+                    retry_after = _parse_retry_after(e.response.headers)
+                    logger.info(
+                        "Rate limited creating batch, retrying in {}s (Retry-After: {})",
+                        retry_after, e.response.headers.get("retry-after", "not set"),
+                    )
+                    await asyncio.sleep(retry_after)
+
             logger.info("Submitted batch {} with {} {} requests", batch_response.id, len(requests), endpoint)
 
             # Track the active batch

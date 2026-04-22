@@ -115,6 +115,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Extract retry delay in seconds from a Retry-After header, defaulting to 60s. */
+function parseRetryAfter(
+  headers: { get(name: string): string | null } | null | undefined,
+  defaultSeconds = 60,
+): number {
+  const raw = headers?.get("retry-after");
+  if (raw != null) {
+    const parsed = Number(raw);
+    if (!Number.isNaN(parsed)) return Math.max(parsed, 1);
+  }
+  return defaultSeconds;
+}
+
 // ---------------------------------------------------------------------------
 // BatchOpenAI
 // ---------------------------------------------------------------------------
@@ -228,18 +241,50 @@ export class BatchOpenAI extends OpenAI {
         )
         .join("\n");
 
-      // 2. Upload file via the parent's (real) files resource.
-      const file = await this._files.create({
-        file: new File([jsonl], "batch.jsonl", { type: "application/jsonl" }),
-        purpose: "batch" as "assistants", // Cast needed; the SDK types don't include "batch" but the API accepts it.
-      });
+      // 2. Upload file via the parent's (real) files resource (retry on rate limit).
+      let file: Awaited<ReturnType<typeof this._files.create>>;
+      while (true) {
+        try {
+          file = await this._files.create({
+            file: new File([jsonl], "batch.jsonl", { type: "application/jsonl" }),
+            purpose: "batch" as "assistants", // Cast needed; the SDK types don't include "batch" but the API accepts it.
+          });
+          break;
+        } catch (err) {
+          if (err instanceof OpenAI.RateLimitError) {
+            const retryAfter = parseRetryAfter(err.headers);
+            console.info(
+              `[autobatcher] Rate limited uploading batch file, retrying in ${retryAfter}s (Retry-After: ${err.headers?.get("retry-after") ?? "not set"})`,
+            );
+            await sleep(retryAfter * 1000);
+            continue;
+          }
+          throw err;
+        }
+      }
 
-      // 3. Create batch via the parent's (real) batches resource.
-      const batchJob = await this._batches.create({
-        input_file_id: file.id,
-        endpoint: batchEndpoint as "/v1/chat/completions",
-        completion_window: this._completionWindow as "24h",
-      });
+      // 3. Create batch via the parent's (real) batches resource (retry on rate limit).
+      let batchJob: Awaited<ReturnType<typeof this._batches.create>>;
+      while (true) {
+        try {
+          batchJob = await this._batches.create({
+            input_file_id: file.id,
+            endpoint: batchEndpoint as "/v1/chat/completions",
+            completion_window: this._completionWindow as "24h",
+          });
+          break;
+        } catch (err) {
+          if (err instanceof OpenAI.RateLimitError) {
+            const retryAfter = parseRetryAfter(err.headers);
+            console.info(
+              `[autobatcher] Rate limited creating batch, retrying in ${retryAfter}s (Retry-After: ${err.headers?.get("retry-after") ?? "not set"})`,
+            );
+            await sleep(retryAfter * 1000);
+            continue;
+          }
+          throw err;
+        }
+      }
 
       // 4. Poll until terminal state.
       const outputFileId = await this._pollBatch(batchJob.id);

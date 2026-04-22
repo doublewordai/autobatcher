@@ -6,12 +6,28 @@ import asyncio
 import json
 import uuid
 
+import httpx
+import openai
 import pytest
 
 from openai.types.chat import ChatCompletion
 from openai.types import CreateEmbeddingResponse
 from autobatcher.client import BatchOpenAI, _PendingRequest
 from tests.conftest import make_batch, make_file_object
+
+
+def _make_rate_limit_error(retry_after: str | None = None) -> openai.RateLimitError:
+    """Build a realistic RateLimitError with optional Retry-After header."""
+    headers = {"content-type": "application/json"}
+    if retry_after is not None:
+        headers["retry-after"] = retry_after
+    resp = httpx.Response(
+        status_code=429,
+        json={"error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}},
+        headers=headers,
+        request=httpx.Request("POST", "https://api.test.com/v1/files"),
+    )
+    return openai.RateLimitError("Rate limit exceeded", response=resp, body=None)
 
 EP = "/v1/chat/completions"
 
@@ -288,3 +304,62 @@ class TestSubmitBatch:
         ab = client._active_batches[0]
         assert ab.result_types["cid-c"] is ChatCompletion
         assert ab.result_types["cid-e"] is CreateEmbeddingResponse
+
+    async def test_files_create_retries_on_rate_limit(
+        self, client: BatchOpenAI
+    ) -> None:
+        """files.create should retry after a 429 with Retry-After header."""
+        client.files.create.side_effect = [
+            _make_rate_limit_error(retry_after="1"),
+            make_file_object("file-retry"),
+        ]
+
+        reqs = _add_pending(client, 1)
+        await client._submit_batch(EP)
+
+        assert client.files.create.call_count == 2
+        assert len(client._active_batches) == 1
+
+    async def test_batches_create_retries_on_rate_limit(
+        self, client: BatchOpenAI
+    ) -> None:
+        """batches.create should retry after a 429 with Retry-After header."""
+        client.batches.create.side_effect = [
+            _make_rate_limit_error(retry_after="1"),
+            make_batch(batch_id="batch-retry", status="in_progress", output_file_id=None),
+        ]
+
+        reqs = _add_pending(client, 1)
+        await client._submit_batch(EP)
+
+        assert client.batches.create.call_count == 2
+        assert len(client._active_batches) == 1
+        assert client._active_batches[0].batch_id == "batch-retry"
+
+    async def test_rate_limit_uses_default_retry_when_no_header(
+        self, client: BatchOpenAI
+    ) -> None:
+        """When Retry-After header is absent, should still retry with default delay."""
+        client.files.create.side_effect = [
+            _make_rate_limit_error(retry_after=None),
+            make_file_object("file-default"),
+        ]
+
+        reqs = _add_pending(client, 1)
+        await client._submit_batch(EP)
+
+        assert client.files.create.call_count == 2
+
+    async def test_non_rate_limit_error_still_propagates(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Non-429 errors should still propagate to futures immediately."""
+        client.files.create.side_effect = RuntimeError("server error")
+
+        reqs = _add_pending(client, 1)
+        await client._submit_batch(EP)
+
+        for req in reqs:
+            assert req.future.done()
+            with pytest.raises(RuntimeError, match="server error"):
+                req.future.result()
