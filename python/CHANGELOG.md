@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.7.0...autobatcher-v0.8.0) (2026-04-22)
+
+
+### Features
+
+* retry-after for upload ([58efd04](https://github.com/doublewordai/autobatcher/commit/58efd04c6bdc0fd8cdcb4d6034136d00c0b7fa3b))
+
 ## [0.7.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.6.1...autobatcher-v0.7.0) (2026-04-16)
 
 
