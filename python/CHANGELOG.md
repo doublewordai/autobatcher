@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.9.0...autobatcher-v0.10.0) (2026-04-23)
+
+
+### Features
+
+* serve mode ([d8fd0aa](https://github.com/doublewordai/autobatcher/commit/d8fd0aac39eabf2d429040f5d38beb5d7a74d4e3))
+
+
+### Bug Fixes
+
+* serve mode tests ([082a23d](https://github.com/doublewordai/autobatcher/commit/082a23dfc896a581a7affa900d98458268f2fbd0))
+
 ## [0.9.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.8.0...autobatcher-v0.9.0) (2026-04-23)
 
 
