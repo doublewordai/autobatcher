@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.4.0...autobatcher-ts-v0.5.0) (2026-04-23)
+
+
+### Features
+
+* serve mode ([d8fd0aa](https://github.com/doublewordai/autobatcher/commit/d8fd0aac39eabf2d429040f5d38beb5d7a74d4e3))
+
 ## [0.4.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.3.0...autobatcher-ts-v0.4.0) (2026-04-23)
 
 
