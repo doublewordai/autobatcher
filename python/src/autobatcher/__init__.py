@@ -14,5 +14,5 @@ Usage:
 
 from .client import AsyncOpenAI, BatchOpenAI
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 __all__ = ["AsyncOpenAI", "BatchOpenAI"]

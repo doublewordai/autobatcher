@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.3.0...autobatcher-ts-v0.4.0) (2026-04-23)
+
+
+### Features
+
+* export AsyncOpenAI for async inference ([708de24](https://github.com/doublewordai/autobatcher/commit/708de24f417d8179326456b6c8a564a765570056))
+
 ## [0.3.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-ts-v0.2.1...autobatcher-ts-v0.3.0) (2026-04-22)
 
 
