@@ -6,7 +6,7 @@ import autobatcher.__main__ as cli
 import autobatcher.serve as serve
 
 
-def test_cli_accepts_arbitrary_completion_window(monkeypatch) -> None:
+def test_cli_mode_async_default(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_run_server(**kwargs: object) -> None:
@@ -21,14 +21,37 @@ def test_cli_accepts_arbitrary_completion_window(monkeypatch) -> None:
             "serve",
             "--api-key",
             "sk-test",
-            "--completion-window",
-            "72h",
         ],
     )
 
     cli.main()
 
-    assert captured["completion_window"] == "72h"
+    assert captured["completion_window"] == "1h"
+
+
+def test_cli_mode_batch(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_server(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(serve, "run_server", fake_run_server)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autobatcher",
+            "serve",
+            "--api-key",
+            "sk-test",
+            "--mode",
+            "batch",
+        ],
+    )
+
+    cli.main()
+
+    assert captured["completion_window"] == "24h"
 
 
 def test_cli_passes_batch_metadata_and_shutdown_policy(monkeypatch) -> None:
