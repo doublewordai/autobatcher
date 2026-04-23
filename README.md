@@ -117,18 +117,24 @@ custom `base_url` — evaluation frameworks, benchmark runners, or any OpenAI SD
 consumer.
 
 ```bash
-# Python
+# Python (defaults to --mode async)
 autobatcher serve \
   --base-url https://api.doubleword.ai/v1 \
   --api-key "$DOUBLEWORD_API_KEY" \
   --port 8080
 
-# TypeScript
+# TypeScript (batch mode)
 npx autobatcher serve \
   --base-url https://api.doubleword.ai/v1 \
   --api-key "$DOUBLEWORD_API_KEY" \
+  --mode batch \
   --port 8080
 ```
+
+The `--mode` flag controls the inference tier:
+
+- `--mode async` (default) — async inference, higher priority than batch
+- `--mode batch` — batch inference, best price for bulk workloads
 
 Then point any OpenAI-compatible client at the proxy:
 

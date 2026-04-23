@@ -23,7 +23,7 @@ const { values, positionals } = parseArgs({
     "batch-size": { type: "string", default: "1000" },
     "batch-window": { type: "string", default: "10" },
     "poll-interval": { type: "string", default: "5" },
-    "completion-window": { type: "string", default: "24h" },
+    mode: { type: "string", default: "async" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -45,7 +45,7 @@ Options:
   --batch-size <n>            Max requests per batch (default: 1000)
   --batch-window <seconds>    Batch collection window (default: 10)
   --poll-interval <seconds>   Polling interval (default: 5)
-  --completion-window <window> "24h" batch (default) or "1h" async inference
+  --mode <async|batch>        "async" (default) or "batch" inference
   -h, --help                  Show this help
 `.trim());
   process.exit(values.help ? 0 : 1);
@@ -53,6 +53,11 @@ Options:
 
 if (command !== "serve") {
   console.error(`Unknown command: ${command}. Use "autobatcher serve".`);
+  process.exit(1);
+}
+
+if (values.mode !== "async" && values.mode !== "batch") {
+  console.error(`Error: --mode must be "async" or "batch", got "${values.mode}"`);
   process.exit(1);
 }
 
@@ -76,7 +81,7 @@ const { close } = serve({
   batchSize: parseInt(values["batch-size"]!, 10),
   batchWindowSeconds: parseInt(values["batch-window"]!, 10),
   pollIntervalSeconds: parseInt(values["poll-interval"]!, 10),
-  completionWindow: values["completion-window"],
+  completionWindow: values.mode === "batch" ? "24h" : "1h",
 });
 
 // Graceful shutdown
