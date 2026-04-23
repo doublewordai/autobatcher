@@ -158,8 +158,8 @@ shutdown behaviour — see the [Python README](python/README.md) for full detail
 
 ## Limitations
 
-- Not suitable for real-time or interactive use cases — batch mode adds latency
-  from the collection window and polling cycle.
+- Not suitable for real-time or interactive use cases due to latency from the
+  collection window and polling cycle.
 - Streaming is not supported. Requests that would normally stream are forced to
   non-streaming; the proxy can re-wrap results as SSE for consuming clients.
 - `AsyncOpenAI` is Doubleword-only. OpenAI does not offer an async tier — use
