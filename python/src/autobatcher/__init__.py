@@ -2,7 +2,8 @@
 Autobatcher: Drop-in AsyncOpenAI replacement that transparently batches requests.
 
 Usage:
-    from autobatcher import BatchOpenAI
+    from autobatcher import BatchOpenAI   # 24h batch inference (default)
+    from autobatcher import AsyncOpenAI   # 1h async inference
 
     client = BatchOpenAI(api_key="...")
     response = await client.chat.completions.create(
@@ -11,7 +12,7 @@ Usage:
     )
 """
 
-from .client import BatchOpenAI
+from .client import AsyncOpenAI, BatchOpenAI
 
 __version__ = "0.8.0"
-__all__ = ["BatchOpenAI"]
+__all__ = ["AsyncOpenAI", "BatchOpenAI"]

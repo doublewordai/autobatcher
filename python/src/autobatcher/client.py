@@ -369,7 +369,7 @@ class BatchOpenAI(AsyncOpenAI):
         batch_size: int = 1000,
         batch_window_seconds: float = 10.0,
         poll_interval_seconds: float = 5.0,
-        completion_window: str = "1h",
+        completion_window: str = "24h",
         batch_metadata: dict[str, str] | None = None,
         batch_event_handler: BatchEventHandler | None = None,
         cancel_active_batches_on_close: bool = False,
@@ -943,3 +943,10 @@ class BatchOpenAI(AsyncOpenAI):
 
         await self._http_client.aclose()
         await super().close()
+
+
+class AsyncOpenAI(BatchOpenAI):
+    """BatchOpenAI variant defaulting to 1h completion window (async inference)."""
+
+    def __init__(self, *, completion_window: str = "1h", **kwargs: Any):
+        super().__init__(completion_window=completion_window, **kwargs)

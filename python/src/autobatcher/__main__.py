@@ -51,8 +51,8 @@ def main() -> None:
     serve.add_argument("--poll-interval", type=float, default=5.0, help="Poll interval in seconds (default: 5)")
     serve.add_argument(
         "--completion-window",
-        default="1h",
-        help='Completion window: "1h" for async inference (default), "24h" for batch inference',
+        default="24h",
+        help='Completion window: "24h" for batch inference (default), "1h" for async inference',
     )
     serve.add_argument(
         "--batch-metadata",

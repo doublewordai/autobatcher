@@ -2,7 +2,8 @@
  * autobatcher – Drop-in OpenAI client that transparently batches requests.
  *
  * Usage:
- *   import { BatchOpenAI } from "autobatcher";
+ *   import { BatchOpenAI } from "autobatcher";   // 24h batch inference (default)
+ *   import { AsyncOpenAI } from "autobatcher";   // 1h async inference
  *
  *   const client = new BatchOpenAI({ apiKey: "..." });
  *   const response = await client.chat.completions.create({
@@ -11,7 +12,7 @@
  *   });
  */
 
-export { BatchOpenAI } from "./client.js";
+export { AsyncOpenAI, BatchOpenAI } from "./client.js";
 export type { BatchOpenAIOptions } from "./client.js";
 export { serve } from "./serve.js";
 export type { ServeOptions } from "./serve.js";
