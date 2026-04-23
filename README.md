@@ -15,20 +15,39 @@ Support for OpenAI's batch API or other compatible APIs is best effort — if yo
 
 Batch APIs offer significant cost savings — up to 90% with the
 [Doubleword Inference API](https://docs.doubleword.ai) (OpenAI offers 50% off
-with their 24-hour batch window) — but they require you to restructure your
+with their batch API) — but they require you to restructure your
 code around file uploads and polling. **autobatcher** lets you keep your
 existing async code while getting batch pricing automatically.
 
+## Clients
+
+autobatcher exports two clients:
+
+- **`AsyncOpenAI`** — for async inference (up to 50% off with Doubleword).
+  Requests are prioritised ahead of batch but are not real-time. Ideal for
+  agentic workflows, background jobs, and development. **Doubleword only** —
+  OpenAI does not offer an async tier; use `AsyncOpenAI` from the `openai`
+  package instead for real-time OpenAI requests.
+- **`BatchOpenAI`** — for batch inference (up to 90% off with Doubleword, 50%
+  off with OpenAI). Designed for bulk workloads with less time pressure,
+  offering the best price. Works with both Doubleword and OpenAI.
+
 ```python
-# Before: regular async calls (full price)
-from openai import AsyncOpenAI
-client = AsyncOpenAI()
+# Async inference (Doubleword only)
+from autobatcher import AsyncOpenAI
+client = AsyncOpenAI(
+    api_key="sk-...",
+    base_url="https://api.doubleword.ai/v1",
+)
 
-# After: batched calls (up to 90% off with Doubleword Inference API)
+# Batch inference (Doubleword or OpenAI)
 from autobatcher import BatchOpenAI
-client = BatchOpenAI(base_url="https://api.doubleword.ai/v1")
+client = BatchOpenAI(
+    api_key="sk-...",
+    base_url="https://api.doubleword.ai/v1",
+)
 
-# Same interface, same code
+# Same interface for both — just like the OpenAI SDK
 response = await client.chat.completions.create(
     model="gpt-4o",
     messages=[{"role": "user", "content": "Hello!"}]
@@ -36,15 +55,21 @@ response = await client.chat.completions.create(
 ```
 
 ```typescript
-// Before: regular calls (full price)
-import OpenAI from "openai";
-const client = new OpenAI();
+// Async inference (Doubleword only)
+import { AsyncOpenAI } from "autobatcher";
+const client = new AsyncOpenAI({
+  apiKey: "sk-...",
+  baseURL: "https://api.doubleword.ai/v1",
+});
 
-// After: batched calls (up to 90% off with Doubleword Inference API)
+// Batch inference (Doubleword or OpenAI)
 import { BatchOpenAI } from "autobatcher";
-const client = new BatchOpenAI({ baseURL: "https://api.doubleword.ai/v1" });
+const client = new BatchOpenAI({
+  apiKey: "sk-...",
+  baseURL: "https://api.doubleword.ai/v1",
+});
 
-// Same interface, same code
+// Same interface for both — just like the OpenAI SDK
 const response = await client.chat.completions.create({
   model: "gpt-4o",
   messages: [{ role: "user", content: "Hello!" }],
@@ -70,20 +95,7 @@ in a single batch — each result is parsed with the correct type automatically.
 | Batch size | `batch_size` | `batchSize` | `1000` | Submit batch when this many requests are queued |
 | Batch window | `batch_window_seconds` | `batchWindowSeconds` | `10.0` | Submit batch after this many seconds |
 | Poll interval | `poll_interval_seconds` | `pollIntervalSeconds` | `5.0` | How often to poll for batch completion |
-| Completion window | `completion_window` | `completionWindow` | `"1h"` | Completion deadline (see below) |
 | Batch metadata | `batch_metadata` | — | `None` | Optional metadata attached to each batch (Python only) |
-
-### Completion window
-
-The `completion_window` controls the deadline and pricing tier:
-
-- **`"1h"`** (default) — async inference. Faster turnaround than batch mode,
-  still significantly cheaper than real-time. Supported by the
-  [Doubleword Inference API](https://docs.doubleword.ai) only.
-- **`"24h"`** — batch inference. Maximum cost savings (up to 90% with the
-  [Doubleword Inference API](https://docs.doubleword.ai), 50% with OpenAI).
-  Use for background jobs like evals, data processing, or bulk extraction
-  where latency doesn't matter. This is the only window OpenAI supports.
 
 ## Supported endpoints
 
@@ -144,10 +156,9 @@ shutdown behaviour — see the [Python README](python/README.md) for full detail
   from the collection window and polling cycle.
 - Streaming is not supported. Requests that would normally stream are forced to
   non-streaming; the proxy can re-wrap results as SSE for consuming clients.
-- OpenAI only supports `completion_window: "24h"`. The `"1h"` window is a
-  Doubleword-specific feature.
-- No automatic escalation to real-time if the completion window elapses — the
-  batch will be marked as expired.
+- `AsyncOpenAI` is Doubleword-only. OpenAI does not offer an async tier — use
+  `BatchOpenAI` for OpenAI batch workloads, or `AsyncOpenAI` from the `openai`
+  package for real-time OpenAI requests.
 
 ## Python
 
@@ -157,17 +168,16 @@ Full documentation: [`python/README.md`](python/README.md)
 pip install autobatcher
 ```
 
-`BatchOpenAI` is a subclass of `AsyncOpenAI` — it passes `isinstance` checks
-and works anywhere the async client is accepted (LangChain, LlamaIndex,
-PydanticAI, OpenAI Agents SDK, etc.).
+Both `AsyncOpenAI` and `BatchOpenAI` are subclasses of `openai.AsyncOpenAI` —
+they pass `isinstance` checks and work anywhere the async client is accepted
+(LangChain, LlamaIndex, PydanticAI, OpenAI Agents SDK, etc.).
 
 ```python
-from autobatcher import BatchOpenAI
+from autobatcher import AsyncOpenAI
 
-async with BatchOpenAI(
+async with AsyncOpenAI(
     api_key="sk-...",
     base_url="https://api.doubleword.ai/v1",
-    completion_window="1h",
 ) as client:
     results = await asyncio.gather(*[
         client.chat.completions.create(
@@ -186,16 +196,15 @@ Full documentation: [`typescript/README.md`](typescript/README.md)
 npm install autobatcher openai
 ```
 
-`BatchOpenAI` is a subclass of `OpenAI` — it passes `instanceof` checks and
-works anywhere the standard client is accepted.
+Both `AsyncOpenAI` and `BatchOpenAI` are subclasses of `OpenAI` — they pass
+`instanceof` checks and work anywhere the standard client is accepted.
 
 ```typescript
-import { BatchOpenAI } from "autobatcher";
+import { AsyncOpenAI } from "autobatcher";
 
-const client = new BatchOpenAI({
+const client = new AsyncOpenAI({
   apiKey: "sk-...",
   baseURL: "https://api.doubleword.ai/v1",
-  completionWindow: "1h",
 });
 
 const [a, b, c] = await Promise.all([
