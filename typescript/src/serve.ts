@@ -1,6 +1,6 @@
 /**
- * autobatcher serve — local OpenAI-compatible HTTP proxy that transparently
- * batches incoming requests via BatchOpenAI.
+ * autobatcher serve — local OpenAI-compatible HTTP proxy for flex and batch
+ * inference via BatchOpenAI.
  *
  * Usage:
  *   npx autobatcher serve --base-url https://api.doubleword.ai/v1 --api-key sk-...
@@ -71,7 +71,7 @@ function log(event: string, data: Record<string, unknown> = {}): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Start an OpenAI-compatible HTTP proxy that batches requests.
+ * Start an OpenAI-compatible HTTP proxy using flex polling by default.
  * Returns the server instance and a close function.
  */
 export function serve(options: ServeOptions): {
@@ -100,7 +100,7 @@ export function serve(options: ServeOptions): {
       return;
     }
 
-    // Only accept POST to batched routes
+    // Only accept POST to intercepted inference routes
     if (method !== "POST" || !BATCHED_ROUTES.has(url)) {
       jsonResponse(res, 404, {
         error: { message: `Route not found: ${method} ${url}`, type: "invalid_request_error" },
@@ -125,8 +125,7 @@ export function serve(options: ServeOptions): {
           result = await client.embeddings.create(params as unknown as Parameters<typeof client.embeddings.create>[0]);
           break;
         case "/v1/responses":
-          // Responses API — enqueue directly
-          result = await client._enqueue("/v1/responses", params);
+          result = await client.responses.create(params as unknown as Parameters<typeof client.responses.create>[0]);
           break;
         default:
           jsonResponse(res, 404, { error: { message: "Not found" } });

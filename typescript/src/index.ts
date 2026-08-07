@@ -1,9 +1,9 @@
 /**
- * autobatcher – Drop-in OpenAI client that transparently batches requests.
+ * autobatcher – Drop-in OpenAI client for flex and batch inference.
  *
  * Usage:
- *   import { BatchOpenAI } from "autobatcher";   // 24h batch inference (default)
- *   import { AsyncOpenAI } from "autobatcher";   // 1h async inference
+ *   import { BatchOpenAI } from "autobatcher";   // flex polling by default
+ *   import { AsyncOpenAI } from "autobatcher";   // equivalent compatibility name
  *
  *   const client = new BatchOpenAI({ apiKey: "..." });
  *   const response = await client.chat.completions.create({

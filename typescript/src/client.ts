@@ -1,11 +1,11 @@
 /**
  * BatchOpenAI – an OpenAI subclass that intercepts chat.completions.create(),
- * embeddings.create(), and responses.create() and routes them through the
- * OpenAI-compatible Batch API.
+ * embeddings.create(), and responses.create(). Text uses background flex
+ * polling by default; embeddings and explicit 24-hour calls use the Batch API.
  *
- * Concurrent calls are collected into a queue, serialised as JSONL, uploaded
- * as a batch input file, and polled until results are available. Each original
- * caller's Promise is resolved with the corresponding result.
+ * Flex calls submit immediately and poll by response ID without holding the
+ * submission connection open. Batch calls retain queue, JSONL, upload, poll,
+ * and result-distribution behavior.
  *
  * This mirrors the Python `autobatcher.BatchOpenAI` class.
  */
@@ -20,6 +20,10 @@ import type {
   CreateEmbeddingResponse,
   EmbeddingCreateParams,
 } from "openai/resources/embeddings";
+import type {
+  Response as OpenAIResponse,
+  ResponseCreateParamsNonStreaming,
+} from "openai/resources/responses/responses";
 /** Runtime-agnostic UUID — works in Node, Deno, Bun, and Cloudflare Workers. */
 const uuid = (): string =>
   (globalThis.crypto as unknown as { randomUUID(): string }).randomUUID();
@@ -33,9 +37,9 @@ export interface BatchOpenAIOptions extends OpenAIClientOptions {
   batchSize?: number;
   /** Seconds to wait before flushing a partial batch (default 10). */
   batchWindowSeconds?: number;
-  /** Seconds between poll ticks when waiting for batch completion (default 5). */
+  /** Seconds between flex or batch poll ticks (default 5). */
   pollIntervalSeconds?: number;
-  /** Completion window: "24h" for batch inference (default), "1h" for async inference. */
+  /** Set to "24h" for batch inference; otherwise use flex polling (default). */
   completionWindow?: string;
 }
 
@@ -96,6 +100,17 @@ class BatchedEmbeddings {
   }
 }
 
+class BatchedResponses {
+  constructor(private client: BatchOpenAI) {}
+
+  create(body: ResponseCreateParamsNonStreaming): Promise<OpenAIResponse> {
+    return this.client._enqueue(
+      "/v1/responses",
+      body as unknown as Record<string, unknown>,
+    ) as Promise<OpenAIResponse>;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -103,24 +118,163 @@ class BatchedEmbeddings {
 /** Strip undefined values so JSON.stringify produces clean output. */
 function cleanParams(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  const extraBody = obj.extra_body;
   for (const [k, v] of Object.entries(obj)) {
-    if (v !== undefined) {
+    if (
+      v !== undefined &&
+      k !== "extra_body" &&
+      k !== "extra_headers" &&
+      k !== "extra_query" &&
+      k !== "timeout"
+    ) {
       out[k] = v;
     }
   }
+  if (extraBody && typeof extraBody === "object" && !Array.isArray(extraBody)) {
+    Object.assign(out, extraBody);
+  }
   return out;
+}
+
+export function chatParamsToResponse(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const translated = cleanParams(params);
+  const n = translated.n ?? 1;
+  delete translated.n;
+  if (n !== 1) {
+    throw new Error("Flex inference supports only n=1 for chat completions");
+  }
+
+  const messages = translated.messages;
+  delete translated.messages;
+  if (!messages) {
+    throw new Error("Chat completions require messages");
+  }
+  translated.input = messages;
+
+  const maxCompletionTokens = translated.max_completion_tokens;
+  const legacyMaxTokens = translated.max_tokens;
+  delete translated.max_completion_tokens;
+  delete translated.max_tokens;
+  if (maxCompletionTokens !== undefined) {
+    translated.max_output_tokens = maxCompletionTokens;
+  } else if (legacyMaxTokens !== undefined) {
+    translated.max_output_tokens = legacyMaxTokens;
+  }
+
+  const responseFormat = translated.response_format;
+  delete translated.response_format;
+  if (responseFormat !== undefined) {
+    translated.text = { format: responseFormat };
+  }
+
+  delete translated.stream_options;
+  translated.stream = false;
+  return translated;
+}
+
+export function responseToChatCompletion(
+  response: OpenAIResponse,
+): ChatCompletion {
+  const textParts: string[] = [];
+  const toolCalls: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }> = [];
+
+  for (const rawItem of response.output) {
+    const item = rawItem as unknown as Record<string, unknown>;
+    if (item.type === "message") {
+      const content = item.content;
+      if (typeof content === "string") {
+        textParts.push(content);
+      } else if (Array.isArray(content)) {
+        for (const rawPart of content) {
+          const part = rawPart as Record<string, unknown>;
+          if (part.type === "output_text" && typeof part.text === "string") {
+            textParts.push(part.text);
+          }
+        }
+      }
+
+      const messageToolCalls = item.tool_calls;
+      if (Array.isArray(messageToolCalls)) {
+        for (const rawCall of messageToolCalls) {
+          const call = rawCall as Record<string, unknown>;
+          const fn = (call.function ?? {}) as Record<string, unknown>;
+          toolCalls.push({
+            id: String(call.id ?? call.call_id),
+            type: "function",
+            function: {
+              name: String(fn.name ?? call.name),
+              arguments: String(fn.arguments ?? call.arguments ?? "{}"),
+            },
+          });
+        }
+      }
+    } else if (item.type === "function_call") {
+      toolCalls.push({
+        id: String(item.call_id ?? item.id),
+        type: "function",
+        function: {
+          name: String(item.name),
+          arguments: String(item.arguments ?? "{}"),
+        },
+      });
+    }
+  }
+
+  const message: ChatCompletion["choices"][number]["message"] = {
+    role: "assistant",
+    content: textParts.length > 0 ? textParts.join("") : null,
+    refusal: null,
+  };
+  if (toolCalls.length > 0) message.tool_calls = toolCalls;
+
+  return {
+    id: response.id,
+    object: "chat.completion",
+    created: response.created_at,
+    model: response.model,
+    choices: [
+      {
+        index: 0,
+        message,
+        logprobs: null,
+        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      },
+    ],
+    usage: response.usage
+      ? {
+          prompt_tokens: response.usage.input_tokens,
+          completion_tokens: response.usage.output_tokens,
+          total_tokens: response.usage.total_tokens,
+        }
+      : undefined,
+    service_tier: "flex",
+  };
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getHeader(headers: unknown, name: string): string | null {
+  if (!headers || typeof headers !== "object") return null;
+  const source = headers as Record<string, unknown> & { get?: unknown };
+  if (typeof source.get === "function") {
+    return source.get.call(headers, name) as string | null;
+  }
+  const raw = source[name] ?? source[name.toLowerCase()];
+  if (raw == null) return null;
+  return Array.isArray(raw) ? raw.join(", ") : String(raw);
+}
+
 /** Extract retry delay in seconds from a Retry-After header, defaulting to 60s. */
-function parseRetryAfter(
-  headers: { get(name: string): string | null } | null | undefined,
-  defaultSeconds = 60,
-): number {
-  const raw = headers?.get("retry-after");
+function parseRetryAfter(headers: unknown, defaultSeconds = 60): number {
+  const raw = getHeader(headers, "retry-after");
   if (raw != null) {
     const parsed = Number(raw);
     if (!Number.isNaN(parsed)) return Math.max(parsed, 1);
@@ -136,7 +290,7 @@ export class BatchOpenAI extends OpenAI {
   private readonly _batchSize: number;
   private readonly _batchWindowSeconds: number;
   private readonly _pollIntervalSeconds: number;
-  private readonly _completionWindow: string;
+  private readonly _completionWindow: string | undefined;
 
   private _pending: PendingRequest[] = [];
   private _windowTimer: ReturnType<typeof setTimeout> | null = null;
@@ -147,6 +301,8 @@ export class BatchOpenAI extends OpenAI {
   private readonly _files: OpenAI["files"];
   /** The parent's batches resource, saved before we shadow anything. */
   private readonly _batches: OpenAI["batches"];
+  /** The parent's responses resource used for flex submission and polling. */
+  private readonly _responses: OpenAI["responses"];
 
   constructor(options: BatchOpenAIOptions = {}) {
     const { batchSize, batchWindowSeconds, pollIntervalSeconds, completionWindow, ...openaiOpts } = options;
@@ -155,15 +311,17 @@ export class BatchOpenAI extends OpenAI {
     this._batchSize = batchSize ?? 1000;
     this._batchWindowSeconds = batchWindowSeconds ?? 10;
     this._pollIntervalSeconds = pollIntervalSeconds ?? 5;
-    this._completionWindow = completionWindow ?? "24h";
+    this._completionWindow = completionWindow;
 
     // Save references to the parent's real resources before overwriting.
     this._files = this.files;
     this._batches = this.batches;
+    this._responses = this.responses;
 
-    // Shadow the parent's chat and embeddings with our batching proxies.
+    // Shadow intercepted resources with routing proxies.
     (this as Record<string, unknown>).chat = new BatchedChat(this);
     (this as Record<string, unknown>).embeddings = new BatchedEmbeddings(this);
+    (this as Record<string, unknown>).responses = new BatchedResponses(this);
   }
 
   // -----------------------------------------------------------------------
@@ -181,6 +339,17 @@ export class BatchOpenAI extends OpenAI {
       );
     }
 
+    if (endpoint !== "/v1/embeddings" && this._completionWindow !== "24h") {
+      return this._executeFlex(endpoint, params);
+    }
+
+    return this._enqueueBatch(endpoint, params);
+  }
+
+  private _enqueueBatch(
+    endpoint: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       this._pending.push({
         customId: uuid(),
@@ -199,6 +368,43 @@ export class BatchOpenAI extends OpenAI {
         }, this._batchWindowSeconds * 1000);
       }
     });
+  }
+
+  private async _executeFlex(
+    endpoint: string,
+    params: Record<string, unknown>,
+  ): Promise<OpenAIResponse | ChatCompletion> {
+    const submitParams =
+      endpoint === "/v1/chat/completions"
+        ? chatParamsToResponse(params)
+        : cleanParams(params);
+    if (endpoint !== "/v1/chat/completions" && endpoint !== "/v1/responses") {
+      throw new Error(`Flex inference is not supported for ${endpoint}`);
+    }
+
+    delete submitParams.stream_options;
+    submitParams.stream = false;
+    submitParams.service_tier = "flex";
+    submitParams.background = true;
+
+    let response = await this._responses.create(
+      submitParams as unknown as ResponseCreateParamsNonStreaming,
+    );
+    while (response.status === "queued" || response.status === "in_progress") {
+      await sleep(this._pollIntervalSeconds * 1000);
+      response = await this._responses.retrieve(response.id);
+    }
+
+    if (response.status !== "completed") {
+      const detail = response.error?.message ?? "no error details";
+      throw new Error(
+        `Flex response ${response.id} reached terminal status ${response.status}: ${detail}`,
+      );
+    }
+
+    return endpoint === "/v1/chat/completions"
+      ? responseToChatCompletion(response)
+      : response;
   }
 
   private _scheduleFlush(): void {
@@ -254,7 +460,7 @@ export class BatchOpenAI extends OpenAI {
           if (err instanceof OpenAI.RateLimitError) {
             const retryAfter = parseRetryAfter(err.headers);
             console.info(
-              `[autobatcher] Rate limited uploading batch file, retrying in ${retryAfter}s (Retry-After: ${err.headers?.get("retry-after") ?? "not set"})`,
+              `[autobatcher] Rate limited uploading batch file, retrying in ${retryAfter}s (Retry-After: ${getHeader(err.headers, "retry-after") ?? "not set"})`,
             );
             await sleep(retryAfter * 1000);
             continue;
@@ -270,14 +476,14 @@ export class BatchOpenAI extends OpenAI {
           batchJob = await this._batches.create({
             input_file_id: file.id,
             endpoint: batchEndpoint as "/v1/chat/completions",
-            completion_window: this._completionWindow as "24h",
+            completion_window: "24h",
           });
           break;
         } catch (err) {
           if (err instanceof OpenAI.RateLimitError) {
             const retryAfter = parseRetryAfter(err.headers);
             console.info(
-              `[autobatcher] Rate limited creating batch, retrying in ${retryAfter}s (Retry-After: ${err.headers?.get("retry-after") ?? "not set"})`,
+              `[autobatcher] Rate limited creating batch, retrying in ${retryAfter}s (Retry-After: ${getHeader(err.headers, "retry-after") ?? "not set"})`,
             );
             await sleep(retryAfter * 1000);
             continue;
@@ -427,9 +633,9 @@ export class BatchOpenAI extends OpenAI {
   }
 }
 
-/** BatchOpenAI variant defaulting to 1h completion window (async inference). */
+/** Compatibility alias for the default flex-inference client. */
 export class AsyncOpenAI extends BatchOpenAI {
   constructor(options: BatchOpenAIOptions = {}) {
-    super({ completionWindow: "1h", ...options });
+    super(options);
   }
 }

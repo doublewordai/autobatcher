@@ -1,9 +1,9 @@
 """
-Autobatcher: Drop-in AsyncOpenAI replacement that transparently batches requests.
+Autobatcher: Drop-in AsyncOpenAI replacement for flex and batch inference.
 
 Usage:
-    from autobatcher import BatchOpenAI   # 24h batch inference (default)
-    from autobatcher import AsyncOpenAI   # 1h async inference
+    from autobatcher import BatchOpenAI   # flex polling by default
+    from autobatcher import AsyncOpenAI   # equivalent compatibility name
 
     client = BatchOpenAI(api_key="...")
     response = await client.chat.completions.create(

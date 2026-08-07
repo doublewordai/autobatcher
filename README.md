@@ -1,7 +1,9 @@
 # autobatcher
 
-Drop-in OpenAI client replacement that transparently batches requests via the
-Batch API. Available for [Python](#python) and [TypeScript](#typescript).
+Drop-in OpenAI client replacement that runs text generation through
+Doubleword's flex async-inference polling API by default, with 24-hour batch
+inference available explicitly. Available for [Python](#python) and
+[TypeScript](#typescript).
 
 This library is designed for use with the [Doubleword Inference API](https://docs.doubleword.ai/inference-api/autobatcher).
 Support for OpenAI's batch API or other compatible APIs is best effort — if you experience any issues, please open an issue.
@@ -13,24 +15,17 @@ Support for OpenAI's batch API or other compatible APIs is best effort — if yo
 
 ## Why?
 
-Batch APIs offer significant cost savings — up to 90% with the
-[Doubleword Inference API](https://docs.doubleword.ai) (OpenAI offers 50% off
-with their batch API) — but they require you to restructure your
-code around file uploads and polling. **autobatcher** lets you keep your
-existing async code while getting batch pricing automatically.
+Async and batch inference reduce cost, but normally require applications to
+manage background response IDs, polling, JSONL files, uploads, and result
+matching. **autobatcher** keeps the familiar OpenAI client interface while
+handling those lifecycles internally.
 
 ## Clients
 
-autobatcher exports two clients:
-
-- **`AsyncOpenAI`** — for async inference (up to 50% off with Doubleword).
-  Requests are prioritised ahead of batch but are not real-time. Ideal for
-  agentic workflows, background jobs, and development. **Doubleword only** —
-  OpenAI does not offer an async tier; use `AsyncOpenAI` from the `openai`
-  package instead for real-time OpenAI requests.
-- **`BatchOpenAI`** — for batch inference (up to 90% off with Doubleword, 50%
-  off with OpenAI). Designed for bulk workloads with less time pressure,
-  offering the best price. Works with both Doubleword and OpenAI.
+autobatcher exports `AsyncOpenAI` and `BatchOpenAI` as compatible names for the
+same default behavior. Both use Doubleword flex polling unless
+`completion_window="24h"` / `completionWindow: "24h"` is supplied. Embeddings
+always use 24-hour batches because they do not have a flex tier.
 
 ```python
 # Async inference (Doubleword only)
@@ -40,11 +35,12 @@ client = AsyncOpenAI(
     base_url="https://api.doubleword.ai/v1",
 )
 
-# Batch inference (Doubleword or OpenAI)
+# Explicit 24-hour batch inference
 from autobatcher import BatchOpenAI
 client = BatchOpenAI(
     api_key="sk-...",
     base_url="https://api.doubleword.ai/v1",
+    completion_window="24h",
 )
 
 # Same interface for both — just like the OpenAI SDK
@@ -62,11 +58,12 @@ const client = new AsyncOpenAI({
   baseURL: "https://api.doubleword.ai/v1",
 });
 
-// Batch inference (Doubleword or OpenAI)
+// Explicit 24-hour batch inference
 import { BatchOpenAI } from "autobatcher";
 const client = new BatchOpenAI({
   apiKey: "sk-...",
   baseURL: "https://api.doubleword.ai/v1",
+  completionWindow: "24h",
 });
 
 // Same interface for both — just like the OpenAI SDK
@@ -78,13 +75,14 @@ const response = await client.chat.completions.create({
 
 ## How it works
 
-1. Requests are collected over a configurable time window (default: 10 seconds)
-2. When the window closes or batch size is reached, requests are submitted as a batch
-3. Results are polled and returned to waiting callers as they complete
-4. Your code sees normal response objects — no API changes needed
-
-Different request types (chat completions, embeddings, responses) can be mixed
-in a single batch — each result is parsed with the correct type automatically.
+1. Default chat-completion and Responses calls are submitted immediately to
+   `/v1/responses` with `service_tier: "flex"` and `background: true`.
+2. Autobatcher polls the response ID using short retrieval requests, so the
+   submission connection is not held open during inference.
+3. Chat callers receive a normal `ChatCompletion`; Responses callers receive a
+   normal `Response`.
+4. Embeddings, and all endpoints in explicit 24-hour mode, use the existing
+   queue → JSONL → upload → batch → poll → result lifecycle.
 
 ## Configuration
 
@@ -94,7 +92,8 @@ in a single batch — each result is parsed with the correct type automatically.
 | Base URL | `base_url` | `baseURL` | provider default | API base URL |
 | Batch size | `batch_size` | `batchSize` | `1000` | Submit batch when this many requests are queued |
 | Batch window | `batch_window_seconds` | `batchWindowSeconds` | `10.0` | Submit batch after this many seconds |
-| Poll interval | `poll_interval_seconds` | `pollIntervalSeconds` | `5.0` | How often to poll for batch completion |
+| Poll interval | `poll_interval_seconds` | `pollIntervalSeconds` | `5.0` | How often to poll flex responses or batch completion |
+| Completion window | `completion_window` | `completionWindow` | unset | Set exactly `"24h"` to batch text generation; any other value uses flex |
 | Batch metadata | `batch_metadata` | — | `None` | Optional metadata attached to each batch (Python only) |
 
 ## Supported endpoints
@@ -107,12 +106,12 @@ in a single batch — each result is parsed with the correct type automatically.
 
 All other methods on the client (e.g. `client.models.list()`,
 `client.files.create()`) pass through to the underlying OpenAI client
-unchanged — only the endpoints above are intercepted for batching.
+unchanged — only the endpoints above are intercepted.
 
 ## Serve mode
 
-Both SDKs include a local OpenAI-compatible HTTP proxy that batches incoming
-requests. Useful for transparently batching traffic from tools that support a
+Both SDKs include a local OpenAI-compatible HTTP proxy that routes incoming
+requests. Useful for transparently handling traffic from tools that support a
 custom `base_url` — evaluation frameworks, benchmark runners, or any OpenAI SDK
 consumer.
 
@@ -133,7 +132,7 @@ npx autobatcher serve \
 
 The `--mode` flag controls the inference tier:
 
-- `--mode async` (default) — async inference, higher priority than batch
+- `--mode async` (default) — flex background inference with polling
 - `--mode batch` — batch inference, best price for bulk workloads
 
 Then point any OpenAI-compatible client at the proxy:
@@ -145,11 +144,11 @@ export OPENAI_API_KEY=dummy
 
 Supported proxy routes:
 
-| Route | Upstream batched endpoint |
-|-------|--------------------------|
-| `POST /v1/chat/completions` | `/v1/chat/completions` |
-| `POST /v1/embeddings` | `/v1/embeddings` |
-| `POST /v1/responses` | `/v1/responses` |
+| Route | Default upstream behavior |
+|-------|---------------------------|
+| `POST /v1/chat/completions` | flex Responses polling, converted back to chat |
+| `POST /v1/embeddings` | 24-hour batch |
+| `POST /v1/responses` | flex Responses polling |
 | `GET /health` | local healthcheck |
 
 The proxy emits structured JSON lifecycle events to stdout for log collection.
@@ -158,13 +157,13 @@ shutdown behaviour — see the [Python README](python/README.md) for full detail
 
 ## Limitations
 
-- Not suitable for real-time or interactive use cases due to latency from the
-  collection window and polling cycle.
+- Not suitable for real-time or interactive use cases. Flex work has
+  minutes-scale latency and 24-hour batches may take longer.
 - Streaming is not supported. Requests that would normally stream are forced to
   non-streaming; the proxy can re-wrap results as SSE for consuming clients.
-- `AsyncOpenAI` is Doubleword-only. OpenAI does not offer an async tier — use
-  `BatchOpenAI` for OpenAI batch workloads, or `AsyncOpenAI` from the `openai`
-  package for real-time OpenAI requests.
+- Default flex polling is Doubleword-only. For OpenAI batch workloads, specify
+  a 24-hour completion window; for realtime OpenAI requests, use the upstream
+  OpenAI client directly.
 
 ## Python
 

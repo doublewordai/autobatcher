@@ -26,13 +26,13 @@ def _parse_batch_metadata(items: list[str] | None) -> dict[str, str]:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="autobatcher",
-        description="Drop-in OpenAI batch proxy",
+        description="Drop-in OpenAI proxy for flex and batch inference",
     )
     subparsers = parser.add_subparsers(dest="command")
 
     serve = subparsers.add_parser(
         "serve",
-        help="Start an OpenAI-compatible HTTP server that batches requests",
+        help="Start an OpenAI-compatible HTTP server for flex and batch inference",
     )
     serve.add_argument(
         "--base-url",
@@ -95,7 +95,7 @@ def main() -> None:
             batch_size=args.batch_size,
             batch_window_seconds=args.batch_window,
             poll_interval_seconds=args.poll_interval,
-            completion_window="1h" if args.mode == "async" else "24h",
+            completion_window=None if args.mode == "async" else "24h",
             batch_metadata=batch_metadata,
             cancel_active_batches_on_close=not args.keep_active_batches_on_close,
         )

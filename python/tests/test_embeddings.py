@@ -36,6 +36,53 @@ def _httpx_response(
 
 
 class TestEmbeddingsJSONL:
+    async def test_default_mode_embeddings_force_24h_batch(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Regression: embeddings have no flex tier and must use 24h batches."""
+        client._completion_window = None
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        req = _PendingRequest(
+            custom_id="emb-window",
+            endpoint="/v1/embeddings",
+            result_type=CreateEmbeddingResponse,
+            params={"model": "text-embedding-3-small", "input": "hello"},
+            future=fut,
+        )
+        client._pending[req.endpoint] = [req]
+
+        await client._submit_batch(req.endpoint)
+
+        assert client.batches.create.await_args.kwargs["completion_window"] == "24h"
+
+    async def test_embeddings_never_enter_flex_executor(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Regression: default mode must retain the embedding batch queue."""
+        client._completion_window = None
+        client._batch_size = 1
+        client._execute_flex = AsyncMock(
+            side_effect=AssertionError("embeddings entered flex inference")
+        )
+
+        task = asyncio.create_task(
+            client.embeddings.create(
+                model="text-embedding-3-small",
+                input="hello",
+            )
+        )
+        await asyncio.sleep(0)
+
+        client._execute_flex.assert_not_awaited()
+        client.files.create.assert_awaited_once()
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if client._poller_task and not client._poller_task.done():
+            client._poller_task.cancel()
+            await asyncio.gather(client._poller_task, return_exceptions=True)
+
     async def test_jsonl_has_embeddings_url(self, client: BatchOpenAI) -> None:
         """Embedding requests should produce JSONL lines with url=/v1/embeddings."""
         loop = asyncio.get_event_loop()

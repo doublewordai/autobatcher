@@ -26,7 +26,7 @@ def test_cli_mode_async_default(monkeypatch) -> None:
 
     cli.main()
 
-    assert captured["completion_window"] == "1h"
+    assert captured["completion_window"] is None
 
 
 def test_cli_mode_batch(monkeypatch) -> None:
