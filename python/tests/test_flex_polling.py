@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,6 +14,11 @@ import autobatcher.client as client_module
 from autobatcher import AsyncOpenAI as AutobatcherAsyncOpenAI
 from autobatcher.client import BatchOpenAI
 from tests.conftest import make_response_api_result
+
+
+TRANSLATION_CASES = json.loads(
+    (Path(__file__).parents[2] / "fixtures/chat_responses_translation.json").read_text()
+)
 
 
 def _response(
@@ -159,6 +166,17 @@ class TestFlexPolling:
 
 
 class TestChatAdapters:
+    @pytest.mark.parametrize(
+        "case",
+        TRANSLATION_CASES,
+        ids=[case["name"] for case in TRANSLATION_CASES],
+    )
+    def test_chat_requests_match_shared_response_fixtures(self, case: dict) -> None:
+        """Regression: Python and TypeScript must emit the same typed wire shape."""
+        assert client_module._chat_params_to_response(case["chat_request"]) == case[
+            "response_request"
+        ]
+
     def test_chat_params_translate_to_responses_fields(self) -> None:
         """Regression: chat-only field names must not leak into Responses."""
         translated = client_module._chat_params_to_response(
@@ -189,6 +207,22 @@ class TestChatAdapters:
                     "model": "test-model",
                     "messages": [{"role": "user", "content": "hello"}],
                     "n": 2,
+                }
+            )
+
+    def test_chat_params_reject_custom_tools_outside_minimum_sdk_schema(self) -> None:
+        """Regression: transforms must stay inside the declared OpenAI 2.x types."""
+        with pytest.raises(ValueError, match="custom.*tool|tool.*custom"):
+            client_module._chat_params_to_response(
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tools": [
+                        {
+                            "type": "custom",
+                            "custom": {"name": "shell", "format": {"type": "text"}},
+                        }
+                    ],
                 }
             )
 
@@ -230,3 +264,52 @@ class TestChatAdapters:
         assert tool_calls[0].function.name == "get_weather"
         assert tool_calls[0].function.arguments == '{"city":"London"}'
         assert result.choices[0].finish_reason == "tool_calls"
+
+    def test_refusal_service_tier_and_usage_details_are_preserved(self) -> None:
+        """Regression: typed response fields must not disappear during adaptation."""
+        body = make_response_api_result(output_text="")
+        body["service_tier"] = "priority"
+        body["output"] = [
+            {
+                "type": "message",
+                "id": "msg-refusal",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "refusal", "refusal": "I cannot help with that."}
+                ],
+            }
+        ]
+        body["usage"]["input_tokens_details"]["cached_tokens"] = 7
+        body["usage"]["output_tokens_details"]["reasoning_tokens"] = 3
+        response = Response.model_validate(body)
+
+        result = client_module._response_to_chat_completion(response)
+
+        message = result.choices[0].message
+        assert message.content is None
+        assert message.refusal == "I cannot help with that."
+        assert result.service_tier == "priority"
+        assert result.usage is not None
+        assert result.usage.prompt_tokens_details is not None
+        assert result.usage.prompt_tokens_details.cached_tokens == 7
+        assert result.usage.completion_tokens_details is not None
+        assert result.usage.completion_tokens_details.reasoning_tokens == 3
+
+    def test_function_call_requires_a_real_call_id(self) -> None:
+        """Regression: malformed calls must not become placeholder Chat tool IDs."""
+        body = make_response_api_result(output_text="")
+        body["output"] = [
+            {
+                "type": "function_call",
+                "id": "fc-test",
+                "call_id": "",
+                "name": "get_weather",
+                "arguments": "{}",
+                "status": "completed",
+            }
+        ]
+        response = Response.model_validate(body)
+
+        with pytest.raises(ValueError, match="call_id"):
+            client_module._response_to_chat_completion(response)

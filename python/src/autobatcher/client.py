@@ -28,6 +28,11 @@ from openai.types import CreateEmbeddingResponse
 from openai.types.responses import Response
 from openai import NotGiven
 from openai._types import Omit
+from openai.types.chat.completion_create_params import (
+    CompletionCreateParamsNonStreaming,
+)
+
+from ._translation import chat_params_to_response, response_to_chat_completion
 
 # Sentinel types the openai SDK uses for "not provided" parameters.
 # Both are non-JSON-serializable and must be stripped before batching.
@@ -111,32 +116,9 @@ def _parse_retry_after(headers: httpx.Headers | dict[str, str], default: float =
 
 
 def _chat_params_to_response(params: dict[str, Any]) -> dict[str, Any]:
-    """Translate a Chat Completions request into a Responses API request."""
-    translated = _clean_params(params)
-
-    n = translated.pop("n", 1)
-    if n != 1:
-        raise ValueError("Flex inference supports only n=1 for chat completions")
-
-    messages = translated.pop("messages", None)
-    if messages is None:
-        raise ValueError("Chat completions require messages")
-    translated["input"] = messages
-
-    max_output_tokens = translated.pop("max_completion_tokens", None)
-    legacy_max_tokens = translated.pop("max_tokens", None)
-    if max_output_tokens is not None:
-        translated["max_output_tokens"] = max_output_tokens
-    elif legacy_max_tokens is not None:
-        translated["max_output_tokens"] = legacy_max_tokens
-
-    response_format = translated.pop("response_format", None)
-    if response_format is not None:
-        translated["text"] = {"format": response_format}
-
-    translated.pop("stream_options", None)
-    translated["stream"] = False
-    return translated
+    """Compatibility wrapper around the official-type request translator."""
+    cleaned = cast(CompletionCreateParamsNonStreaming, _clean_params(params))
+    return cast(dict[str, Any], chat_params_to_response(cleaned))
 
 
 def _response_create_kwargs(params: dict[str, Any]) -> dict[str, Any]:
@@ -149,82 +131,8 @@ def _response_create_kwargs(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _response_to_chat_completion(response: Response) -> ChatCompletion:
-    """Convert a completed Responses API object into a ChatCompletion."""
-    response_data = response.model_dump(mode="json")
-    text_parts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-
-    for item in response_data.get("output", []):
-        item_type = item.get("type")
-        if item_type == "message":
-            content = item.get("content")
-            if isinstance(content, str):
-                text_parts.append(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "output_text":
-                        text = part.get("text")
-                        if isinstance(text, str):
-                            text_parts.append(text)
-            for call in item.get("tool_calls") or []:
-                function = call.get("function") or {}
-                tool_calls.append(
-                    {
-                        "id": call.get("id") or call.get("call_id"),
-                        "type": "function",
-                        "function": {
-                            "name": function.get("name") or call.get("name"),
-                            "arguments": function.get("arguments")
-                            or call.get("arguments")
-                            or "{}",
-                        },
-                    }
-                )
-        elif item_type == "function_call":
-            tool_calls.append(
-                {
-                    "id": item.get("call_id") or item.get("id"),
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name"),
-                        "arguments": item.get("arguments") or "{}",
-                    },
-                }
-            )
-
-    message: dict[str, Any] = {
-        "role": "assistant",
-        "content": "".join(text_parts) if text_parts else None,
-    }
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-
-    usage = response_data.get("usage")
-    chat_usage = None
-    if isinstance(usage, dict):
-        chat_usage = {
-            "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        }
-
-    return ChatCompletion.model_validate(
-        {
-            "id": response.id,
-            "object": "chat.completion",
-            "created": int(response.created_at),
-            "model": response.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": "tool_calls" if tool_calls else "stop",
-                }
-            ],
-            "usage": chat_usage,
-            "service_tier": "flex",
-        }
-    )
+    """Compatibility wrapper around the official-model response translator."""
+    return response_to_chat_completion(response)
 
 
 BatchEndpoint = Literal[

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type { Response } from "openai/resources/responses/responses";
@@ -9,6 +10,19 @@ import {
   chatParamsToResponse,
   responseToChatCompletion,
 } from "../src/client.ts";
+
+interface TranslationCase {
+  name: string;
+  chat_request: Record<string, unknown>;
+  response_request: Record<string, unknown>;
+}
+
+const translationCases = JSON.parse(
+  readFileSync(
+    new URL("../../fixtures/chat_responses_translation.json", import.meta.url),
+    "utf8",
+  ),
+) as TranslationCase[];
 
 function makeResponse(
   status: Response["status"] = "completed",
@@ -104,6 +118,15 @@ test("chat params translate to Responses API fields", () => {
   );
 });
 
+for (const translationCase of translationCases) {
+  test(`shared translation fixture: ${translationCase.name}`, () => {
+    assert.deepEqual(
+      chatParamsToResponse(translationCase.chat_request),
+      translationCase.response_request,
+    );
+  });
+}
+
 test("chat params reject multiple choices", () => {
   assert.throws(
     () =>
@@ -113,6 +136,23 @@ test("chat params reject multiple choices", () => {
         n: 2,
       }),
     /n=1/,
+  );
+});
+
+test("chat params reject custom tools outside the minimum SDK schema", () => {
+  assert.throws(
+    () =>
+      chatParamsToResponse({
+        model: "test-model",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            type: "custom",
+            custom: { name: "shell", format: { type: "text" } },
+          },
+        ],
+      }),
+    /custom.*tool|tool.*custom/,
   );
 });
 
@@ -148,6 +188,56 @@ test("function calls convert to chat tool calls", () => {
     "get_weather",
   );
   assert.equal(completion.choices[0]?.finish_reason, "tool_calls");
+});
+
+test("refusal, service tier, and usage details survive chat adaptation", () => {
+  const response = makeResponse();
+  response.service_tier = "priority";
+  response.output = [
+    {
+      id: "msg-refusal",
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "refusal", refusal: "I cannot help with that." },
+      ],
+    },
+  ];
+  response.usage = {
+    input_tokens: 10,
+    input_tokens_details: { cached_tokens: 7 },
+    output_tokens: 5,
+    output_tokens_details: { reasoning_tokens: 3 },
+    total_tokens: 15,
+  };
+
+  const completion = responseToChatCompletion(response);
+
+  assert.equal(completion.choices[0]?.message.content, null);
+  assert.equal(
+    completion.choices[0]?.message.refusal,
+    "I cannot help with that.",
+  );
+  assert.equal(completion.service_tier, "priority");
+  assert.equal(completion.usage?.prompt_tokens_details?.cached_tokens, 7);
+  assert.equal(completion.usage?.completion_tokens_details?.reasoning_tokens, 3);
+});
+
+test("function calls require a real call ID", () => {
+  const response = makeResponse();
+  response.output = [
+    {
+      type: "function_call",
+      id: "fc-test",
+      call_id: "",
+      name: "get_weather",
+      arguments: "{}",
+      status: "completed",
+    },
+  ];
+
+  assert.throws(() => responseToChatCompletion(response), /call_id/);
 });
 
 test("flex responses submit in background and poll to completion", async () => {

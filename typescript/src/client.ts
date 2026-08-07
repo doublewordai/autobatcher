@@ -24,6 +24,13 @@ import type {
   Response as OpenAIResponse,
   ResponseCreateParamsNonStreaming,
 } from "openai/resources/responses/responses";
+import {
+  chatParamsToResponse,
+  cleanParams,
+  responseToChatCompletion,
+} from "./translation.js";
+
+export { chatParamsToResponse, responseToChatCompletion } from "./translation.js";
 /** Runtime-agnostic UUID — works in Node, Deno, Bun, and Cloudflare Workers. */
 const uuid = (): string =>
   (globalThis.crypto as unknown as { randomUUID(): string }).randomUUID();
@@ -114,148 +121,6 @@ class BatchedResponses {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Strip undefined values so JSON.stringify produces clean output. */
-function cleanParams(obj: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  const extraBody = obj.extra_body;
-  for (const [k, v] of Object.entries(obj)) {
-    if (
-      v !== undefined &&
-      k !== "extra_body" &&
-      k !== "extra_headers" &&
-      k !== "extra_query" &&
-      k !== "timeout"
-    ) {
-      out[k] = v;
-    }
-  }
-  if (extraBody && typeof extraBody === "object" && !Array.isArray(extraBody)) {
-    Object.assign(out, extraBody);
-  }
-  return out;
-}
-
-export function chatParamsToResponse(
-  params: Record<string, unknown>,
-): Record<string, unknown> {
-  const translated = cleanParams(params);
-  const n = translated.n ?? 1;
-  delete translated.n;
-  if (n !== 1) {
-    throw new Error("Flex inference supports only n=1 for chat completions");
-  }
-
-  const messages = translated.messages;
-  delete translated.messages;
-  if (!messages) {
-    throw new Error("Chat completions require messages");
-  }
-  translated.input = messages;
-
-  const maxCompletionTokens = translated.max_completion_tokens;
-  const legacyMaxTokens = translated.max_tokens;
-  delete translated.max_completion_tokens;
-  delete translated.max_tokens;
-  if (maxCompletionTokens !== undefined) {
-    translated.max_output_tokens = maxCompletionTokens;
-  } else if (legacyMaxTokens !== undefined) {
-    translated.max_output_tokens = legacyMaxTokens;
-  }
-
-  const responseFormat = translated.response_format;
-  delete translated.response_format;
-  if (responseFormat !== undefined) {
-    translated.text = { format: responseFormat };
-  }
-
-  delete translated.stream_options;
-  translated.stream = false;
-  return translated;
-}
-
-export function responseToChatCompletion(
-  response: OpenAIResponse,
-): ChatCompletion {
-  const textParts: string[] = [];
-  const toolCalls: Array<{
-    id: string;
-    type: "function";
-    function: { name: string; arguments: string };
-  }> = [];
-
-  for (const rawItem of response.output) {
-    const item = rawItem as unknown as Record<string, unknown>;
-    if (item.type === "message") {
-      const content = item.content;
-      if (typeof content === "string") {
-        textParts.push(content);
-      } else if (Array.isArray(content)) {
-        for (const rawPart of content) {
-          const part = rawPart as Record<string, unknown>;
-          if (part.type === "output_text" && typeof part.text === "string") {
-            textParts.push(part.text);
-          }
-        }
-      }
-
-      const messageToolCalls = item.tool_calls;
-      if (Array.isArray(messageToolCalls)) {
-        for (const rawCall of messageToolCalls) {
-          const call = rawCall as Record<string, unknown>;
-          const fn = (call.function ?? {}) as Record<string, unknown>;
-          toolCalls.push({
-            id: String(call.id ?? call.call_id),
-            type: "function",
-            function: {
-              name: String(fn.name ?? call.name),
-              arguments: String(fn.arguments ?? call.arguments ?? "{}"),
-            },
-          });
-        }
-      }
-    } else if (item.type === "function_call") {
-      toolCalls.push({
-        id: String(item.call_id ?? item.id),
-        type: "function",
-        function: {
-          name: String(item.name),
-          arguments: String(item.arguments ?? "{}"),
-        },
-      });
-    }
-  }
-
-  const message: ChatCompletion["choices"][number]["message"] = {
-    role: "assistant",
-    content: textParts.length > 0 ? textParts.join("") : null,
-    refusal: null,
-  };
-  if (toolCalls.length > 0) message.tool_calls = toolCalls;
-
-  return {
-    id: response.id,
-    object: "chat.completion",
-    created: response.created_at,
-    model: response.model,
-    choices: [
-      {
-        index: 0,
-        message,
-        logprobs: null,
-        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
-      },
-    ],
-    usage: response.usage
-      ? {
-          prompt_tokens: response.usage.input_tokens,
-          completion_tokens: response.usage.output_tokens,
-          total_tokens: response.usage.total_tokens,
-        }
-      : undefined,
-    service_tier: "flex",
-  };
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

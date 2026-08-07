@@ -1,0 +1,182 @@
+[
+  {
+    "name": "function tool conversation",
+    "chat_request": {
+      "model": "test-model",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Weather?"
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call-1",
+              "type": "function",
+              "function": {
+                "name": "weather",
+                "arguments": "{\"city\":\"London\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call-1",
+          "content": "Rain"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "weather",
+            "description": "Get weather",
+            "parameters": {
+              "type": "object"
+            },
+            "strict": true
+          }
+        }
+      ],
+      "tool_choice": {
+        "type": "function",
+        "function": {
+          "name": "weather"
+        }
+      },
+      "reasoning_effort": "medium"
+    },
+    "response_request": {
+      "model": "test-model",
+      "input": [
+        {
+          "role": "user",
+          "content": "Weather?"
+        },
+        {
+          "type": "function_call",
+          "call_id": "call-1",
+          "name": "weather",
+          "arguments": "{\"city\":\"London\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call-1",
+          "output": "Rain"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "name": "weather",
+          "description": "Get weather",
+          "parameters": {
+            "type": "object"
+          },
+          "strict": true
+        }
+      ],
+      "tool_choice": {
+        "type": "function",
+        "name": "weather"
+      },
+      "reasoning": {
+        "effort": "medium"
+      },
+      "stream": false
+    }
+  },
+  {
+    "name": "multimodal user content",
+    "chat_request": {
+      "model": "test-model",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Describe this image"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://example.com/image.png",
+                "detail": "high"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "response_request": {
+      "model": "test-model",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Describe this image"
+            },
+            {
+              "type": "input_image",
+              "image_url": "https://example.com/image.png",
+              "detail": "high"
+            }
+          ]
+        }
+      ],
+      "stream": false
+    }
+  },
+  {
+    "name": "structured JSON schema",
+    "chat_request": {
+      "model": "test-model",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Return JSON"
+        }
+      ],
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "answer",
+          "description": "Structured answer",
+          "schema": {
+            "type": "object"
+          },
+          "strict": true
+        }
+      },
+      "verbosity": "high"
+    },
+    "response_request": {
+      "model": "test-model",
+      "input": [
+        {
+          "role": "user",
+          "content": "Return JSON"
+        }
+      ],
+      "text": {
+        "format": {
+          "type": "json_schema",
+          "name": "answer",
+          "description": "Structured answer",
+          "schema": {
+            "type": "object"
+          },
+          "strict": true
+        },
+        "verbosity": "high"
+      },
+      "stream": false
+    }
+  }
+]
