@@ -272,6 +272,9 @@ generation. Exactly `"24h"` selects the Batch API. Embeddings always use a
   minutes-scale latency and 24-hour batches may take longer.
 - Streaming is not supported. Requests that would normally stream are forced to
   non-streaming; the serve proxy can re-wrap results as SSE for consuming clients.
+- Per-request headers, query parameters, and timeouts are forwarded for flex
+  calls. Batch calls reject transport options because Batch API JSONL cannot
+  represent them.
 - Flex polling is Doubleword-only. OpenAI users must select `"24h"` for batch
   inference or use the upstream OpenAI client for realtime inference.
 - No automatic escalation to realtime if flex or batch inference is delayed.

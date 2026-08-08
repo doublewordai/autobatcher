@@ -6,8 +6,10 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+from openai.types.responses import Response
 
 from autobatcher.client import BatchOpenAI, _ActiveBatch
+from tests.conftest import make_response_api_result
 import time
 
 
@@ -39,6 +41,39 @@ class TestClose:
         assert not client._window_tasks
         assert client._poller_task is None
         await client.close()  # Should not raise
+
+    async def test_close_cancels_active_flex_poll_and_upstream_response(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Closing must not leave a local poller or paid background response alive."""
+        body = make_response_api_result(output_text="")
+        body["id"] = "resp-active"
+        body["status"] = "queued"
+        body["output"] = []
+        queued = Response.model_validate(body)
+        client._completion_window = None
+        client._poll_interval_seconds = 60
+        client._responses_api.create = AsyncMock(return_value=queued)
+        client._responses_api.cancel = AsyncMock(return_value=queued)
+
+        request = asyncio.create_task(
+            client.responses.create(model="test-model", input="hello")
+        )
+        for _ in range(10):
+            if client._responses_api.create.await_count:
+                break
+            await asyncio.sleep(0)
+        assert client._responses_api.create.await_count == 1
+
+        try:
+            await client.close()
+
+            assert request.cancelled()
+            client._responses_api.cancel.assert_awaited_once_with("resp-active")
+        finally:
+            if not request.done():
+                request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
 
     async def test_close_cancels_active_upstream_batches_when_enabled(
         self, client: BatchOpenAI

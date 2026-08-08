@@ -30,6 +30,10 @@ import {
   responseToChatCompletion,
 } from "./translation.js";
 
+type OpenAIRequestOptions = NonNullable<
+  Parameters<OpenAI["responses"]["create"]>[1]
+>;
+
 export { chatParamsToResponse, responseToChatCompletion } from "./translation.js";
 /** Runtime-agnostic UUID — works in Node, Deno, Bun, and Cloudflare Workers. */
 const uuid = (): string =>
@@ -71,59 +75,55 @@ interface BatchLineResult {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Proxy resource classes
-// ---------------------------------------------------------------------------
-
-class BatchedCompletions {
-  constructor(private client: BatchOpenAI) {}
-
-  create(
-    body: ChatCompletionCreateParamsNonStreaming,
-  ): Promise<ChatCompletion> {
-    return this.client._enqueue(
-      "/v1/chat/completions",
-      body as unknown as Record<string, unknown>,
-    ) as Promise<ChatCompletion>;
-  }
-}
-
-class BatchedChat {
-  completions: BatchedCompletions;
-
-  constructor(client: BatchOpenAI) {
-    this.completions = new BatchedCompletions(client);
-  }
-}
-
-class BatchedEmbeddings {
-  constructor(private client: BatchOpenAI) {}
-
-  create(body: EmbeddingCreateParams): Promise<CreateEmbeddingResponse> {
-    return this.client._enqueue(
-      "/v1/embeddings",
-      body as unknown as Record<string, unknown>,
-    ) as Promise<CreateEmbeddingResponse>;
-  }
-}
-
-class BatchedResponses {
-  constructor(private client: BatchOpenAI) {}
-
-  create(body: ResponseCreateParamsNonStreaming): Promise<OpenAIResponse> {
-    return this.client._enqueue(
-      "/v1/responses",
-      body as unknown as Record<string, unknown>,
-    ) as Promise<OpenAIResponse>;
-  }
+interface ActiveFlexOperation {
+  controller: AbortController;
+  responseId?: string;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError(signal));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError(signal!));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function overrideCreate<T extends object, Args extends unknown[], Result>(
+  resource: T,
+  create: (...args: Args) => Result,
+): T {
+  return new Proxy(resource, {
+    get(target, property) {
+      if (property === "create") return create;
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function hasRequestOptions(options: OpenAIRequestOptions | undefined): boolean {
+  return (
+    options != null &&
+    Object.values(options).some((value) => value !== undefined)
+  );
 }
 
 function getHeader(headers: unknown, name: string): string | null {
@@ -157,9 +157,13 @@ export class BatchOpenAI extends OpenAI {
   private readonly _pollIntervalSeconds: number;
   private readonly _completionWindow: string | undefined;
 
-  private _pending: PendingRequest[] = [];
-  private _windowTimer: ReturnType<typeof setTimeout> | null = null;
-  private _inflightBatches: Promise<void>[] = [];
+  private _pending = new Map<string, PendingRequest[]>();
+  private _windowTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  private _inflightBatches = new Set<Promise<void>>();
+  private _activeFlex = new Map<Promise<unknown>, ActiveFlexOperation>();
   private _closed = false;
 
   /** The parent's files resource, saved before we shadow anything. */
@@ -168,6 +172,9 @@ export class BatchOpenAI extends OpenAI {
   private readonly _batches: OpenAI["batches"];
   /** The parent's responses resource used for flex submission and polling. */
   private readonly _responses: OpenAI["responses"];
+  /** Parent resources retained for all non-create operations. */
+  private readonly _chat: OpenAI["chat"];
+  private readonly _embeddings: OpenAI["embeddings"];
 
   constructor(options: BatchOpenAIOptions = {}) {
     const { batchSize, batchWindowSeconds, pollIntervalSeconds, completionWindow, ...openaiOpts } = options;
@@ -179,14 +186,53 @@ export class BatchOpenAI extends OpenAI {
     this._completionWindow = completionWindow;
 
     // Save references to the parent's real resources before overwriting.
+    this._chat = this.chat;
+    this._embeddings = this.embeddings;
     this._files = this.files;
     this._batches = this.batches;
     this._responses = this.responses;
 
     // Shadow intercepted resources with routing proxies.
-    (this as Record<string, unknown>).chat = new BatchedChat(this);
-    (this as Record<string, unknown>).embeddings = new BatchedEmbeddings(this);
-    (this as Record<string, unknown>).responses = new BatchedResponses(this);
+    const completions = overrideCreate(
+      this._chat.completions,
+      (
+        body: ChatCompletionCreateParamsNonStreaming,
+        requestOptions?: OpenAIRequestOptions,
+      ) =>
+        this._enqueue(
+          "/v1/chat/completions",
+          body as unknown as Record<string, unknown>,
+          requestOptions,
+        ) as Promise<ChatCompletion>,
+    );
+    (this as Record<string, unknown>).chat = new Proxy(this._chat, {
+      get(target, property) {
+        if (property === "completions") return completions;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    (this as Record<string, unknown>).embeddings = overrideCreate(
+      this._embeddings,
+      (body: EmbeddingCreateParams, requestOptions?: OpenAIRequestOptions) =>
+        this._enqueue(
+          "/v1/embeddings",
+          body as unknown as Record<string, unknown>,
+          requestOptions,
+        ) as Promise<CreateEmbeddingResponse>,
+    );
+    (this as Record<string, unknown>).responses = overrideCreate(
+      this._responses,
+      (
+        body: ResponseCreateParamsNonStreaming,
+        options?: OpenAIRequestOptions,
+      ) =>
+        this._enqueue(
+          "/v1/responses",
+          body as unknown as Record<string, unknown>,
+          options,
+        ) as Promise<OpenAIResponse>,
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -197,6 +243,7 @@ export class BatchOpenAI extends OpenAI {
   _enqueue(
     endpoint: string,
     params: Record<string, unknown>,
+    options?: OpenAIRequestOptions,
   ): Promise<unknown> {
     if (this._closed) {
       return Promise.reject(
@@ -205,10 +252,51 @@ export class BatchOpenAI extends OpenAI {
     }
 
     if (endpoint !== "/v1/embeddings" && this._completionWindow !== "24h") {
-      return this._executeFlex(endpoint, params);
+      return this._startFlex(endpoint, params, options);
+    }
+
+    if (hasRequestOptions(options)) {
+      return Promise.reject(
+        new Error(
+          "Per-request transport options cannot be represented by the Batch API",
+        ),
+      );
     }
 
     return this._enqueueBatch(endpoint, params);
+  }
+
+  private _startFlex(
+    endpoint: string,
+    params: Record<string, unknown>,
+    options?: OpenAIRequestOptions,
+  ): Promise<OpenAIResponse | ChatCompletion> {
+    const operation: ActiveFlexOperation = {
+      controller: new AbortController(),
+    };
+    const callerSignal = options?.signal;
+    const abortFromCaller = () =>
+      operation.controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) abortFromCaller();
+    else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+
+    const requestOptions = {
+      ...options,
+      signal: operation.controller.signal,
+    } as OpenAIRequestOptions;
+    const promise = this._executeFlex(
+      endpoint,
+      params,
+      requestOptions,
+      operation,
+    );
+    this._activeFlex.set(promise, operation);
+    const cleanup = () => {
+      callerSignal?.removeEventListener("abort", abortFromCaller);
+      this._activeFlex.delete(promise);
+    };
+    promise.then(cleanup, cleanup);
+    return promise;
   }
 
   private _enqueueBatch(
@@ -216,21 +304,24 @@ export class BatchOpenAI extends OpenAI {
     params: Record<string, unknown>,
   ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
-      this._pending.push({
+      const pending = this._pending.get(endpoint) ?? [];
+      pending.push({
         customId: uuid(),
         endpoint,
         body: cleanParams(params),
         resolve,
         reject,
       });
+      this._pending.set(endpoint, pending);
 
-      if (this._pending.length >= this._batchSize) {
-        this._scheduleFlush();
-      } else if (!this._windowTimer) {
-        this._windowTimer = setTimeout(() => {
-          this._windowTimer = null;
-          this._scheduleFlush();
+      if (pending.length >= this._batchSize) {
+        this._scheduleFlush(endpoint);
+      } else if (!this._windowTimers.has(endpoint)) {
+        const timer = setTimeout(() => {
+          this._windowTimers.delete(endpoint);
+          this._scheduleFlush(endpoint);
         }, this._batchWindowSeconds * 1000);
+        this._windowTimers.set(endpoint, timer);
       }
     });
   }
@@ -238,6 +329,8 @@ export class BatchOpenAI extends OpenAI {
   private async _executeFlex(
     endpoint: string,
     params: Record<string, unknown>,
+    options?: OpenAIRequestOptions,
+    operation?: ActiveFlexOperation,
   ): Promise<OpenAIResponse | ChatCompletion> {
     const submitParams =
       endpoint === "/v1/chat/completions"
@@ -252,52 +345,63 @@ export class BatchOpenAI extends OpenAI {
     submitParams.service_tier = "flex";
     submitParams.background = true;
 
-    let response = await this._responses.create(
-      submitParams as unknown as ResponseCreateParamsNonStreaming,
-    );
-    while (response.status === "queued" || response.status === "in_progress") {
-      await sleep(this._pollIntervalSeconds * 1000);
-      response = await this._responses.retrieve(response.id);
-    }
-
-    if (response.status !== "completed") {
-      const detail = response.error?.message ?? "no error details";
-      throw new Error(
-        `Flex response ${response.id} reached terminal status ${response.status}: ${detail}`,
+    try {
+      let response = await this._responses.create(
+        submitParams as unknown as ResponseCreateParamsNonStreaming,
+        options,
       );
-    }
+      if (operation) operation.responseId = response.id;
+      while (response.status === "queued" || response.status === "in_progress") {
+        await sleep(this._pollIntervalSeconds * 1000, options?.signal);
+        response = await this._responses.retrieve(response.id, undefined, options);
+      }
 
-    return endpoint === "/v1/chat/completions"
-      ? responseToChatCompletion(response)
-      : response;
+      if (response.status !== "completed") {
+        const detail = response.error?.message ?? "no error details";
+        throw new Error(
+          `Flex response ${response.id} reached terminal status ${response.status}: ${detail}`,
+        );
+      }
+
+      return endpoint === "/v1/chat/completions"
+        ? responseToChatCompletion(response)
+        : response;
+    } catch (error) {
+      if (options?.signal?.aborted && operation?.responseId) {
+        try {
+          await this._responses.cancel(operation.responseId);
+        } catch {
+          // Preserve the caller's cancellation error if upstream cleanup fails.
+        }
+      }
+      throw error;
+    }
   }
 
-  private _scheduleFlush(): void {
-    if (this._pending.length === 0) return;
-    const p = this._flush();
-    this._inflightBatches.push(p);
-    p.finally(() => {
-      const idx = this._inflightBatches.indexOf(p);
-      if (idx >= 0) this._inflightBatches.splice(idx, 1);
-    });
+  private _scheduleFlush(endpoint: string): void {
+    if ((this._pending.get(endpoint)?.length ?? 0) === 0) return;
+    const promise = this._flush(endpoint);
+    this._inflightBatches.add(promise);
+    const remove = () => this._inflightBatches.delete(promise);
+    promise.then(remove, remove);
   }
 
   // -----------------------------------------------------------------------
   // Flush: submit batch, poll, distribute results
   // -----------------------------------------------------------------------
 
-  private async _flush(): Promise<void> {
-    if (this._pending.length === 0) return;
+  private async _flush(endpoint: string): Promise<void> {
+    const pending = this._pending.get(endpoint);
+    if (!pending?.length) return;
 
-    const batch = this._pending.splice(0, this._pending.length);
+    const batch = pending.splice(0, pending.length);
+    this._pending.delete(endpoint);
 
-    if (this._windowTimer) {
-      clearTimeout(this._windowTimer);
-      this._windowTimer = null;
-    }
+    const timer = this._windowTimers.get(endpoint);
+    if (timer) clearTimeout(timer);
+    this._windowTimers.delete(endpoint);
 
-    // Determine the endpoint for this batch (use the first request's endpoint).
-    const batchEndpoint = batch[0].endpoint;
+    const batchEndpoint = endpoint;
 
     try {
       // 1. Build JSONL
@@ -307,13 +411,18 @@ export class BatchOpenAI extends OpenAI {
             custom_id: r.customId,
             method: "POST",
             url: r.endpoint,
-            body: r.body,
+            body: (() => {
+              const body = { ...r.body };
+              delete body.stream_options;
+              if (r.endpoint !== "/v1/embeddings") body.stream = false;
+              return body;
+            })(),
           }),
         )
         .join("\n");
 
       // 2. Upload file via the parent's (real) files resource (retry on rate limit).
-      let file: Awaited<ReturnType<typeof this._files.create>>;
+      let file: Awaited<ReturnType<OpenAI["files"]["create"]>>;
       while (true) {
         try {
           file = await this._files.create({
@@ -335,7 +444,7 @@ export class BatchOpenAI extends OpenAI {
       }
 
       // 3. Create batch via the parent's (real) batches resource (retry on rate limit).
-      let batchJob: Awaited<ReturnType<typeof this._batches.create>>;
+      let batchJob: Awaited<ReturnType<OpenAI["batches"]["create"]>>;
       while (true) {
         try {
           batchJob = await this._batches.create({
@@ -485,16 +594,20 @@ export class BatchOpenAI extends OpenAI {
   async close(): Promise<void> {
     this._closed = true;
 
-    if (this._windowTimer) {
-      clearTimeout(this._windowTimer);
-      this._windowTimer = null;
+    const activeFlex = Array.from(this._activeFlex.entries());
+    for (const [, operation] of activeFlex) {
+      operation.controller.abort(new Error("BatchOpenAI closed"));
+    }
+    await Promise.allSettled(activeFlex.map(([promise]) => promise));
+
+    for (const timer of this._windowTimers.values()) clearTimeout(timer);
+    this._windowTimers.clear();
+
+    for (const endpoint of Array.from(this._pending.keys())) {
+      this._scheduleFlush(endpoint);
     }
 
-    if (this._pending.length > 0) {
-      this._scheduleFlush();
-    }
-
-    await Promise.all(this._inflightBatches);
+    await Promise.all(Array.from(this._inflightBatches));
   }
 }
 

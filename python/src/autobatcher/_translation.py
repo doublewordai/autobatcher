@@ -10,7 +10,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Literal, cast
 
-from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessageParam,
+    ChatCompletionTokenLogprob,
+)
+from openai.types.chat.chat_completion_token_logprob import TopLogprob
 from openai.types.chat.completion_create_params import (
     CompletionCreateParamsNonStreaming,
 )
@@ -381,12 +386,29 @@ def response_to_chat_completion(response: Response) -> ChatCompletion:
     text_parts: list[str] = []
     refusals: list[str] = []
     tool_calls: list[dict[str, Any]] = []
+    content_logprobs: list[ChatCompletionTokenLogprob] = []
 
     for item in response.output:
         if isinstance(item, ResponseOutputMessage):
             for part in item.content:
                 if isinstance(part, ResponseOutputText):
                     text_parts.append(part.text)
+                    for logprob in part.logprobs or []:
+                        content_logprobs.append(
+                            ChatCompletionTokenLogprob(
+                                token=logprob.token,
+                                bytes=logprob.bytes,
+                                logprob=logprob.logprob,
+                                top_logprobs=[
+                                    TopLogprob(
+                                        token=top.token,
+                                        bytes=top.bytes,
+                                        logprob=top.logprob,
+                                    )
+                                    for top in logprob.top_logprobs
+                                ],
+                            )
+                        )
                 elif isinstance(part, ResponseOutputRefusal):
                     refusals.append(part.refusal)
         elif isinstance(item, ResponseFunctionToolCall):
@@ -437,7 +459,11 @@ def response_to_chat_completion(response: Response) -> ChatCompletion:
                 {
                     "index": 0,
                     "message": message,
-                    "logprobs": None,
+                    "logprobs": (
+                        {"content": content_logprobs, "refusal": None}
+                        if content_logprobs
+                        else None
+                    ),
                     "finish_reason": "tool_calls" if tool_calls else "stop",
                 }
             ],

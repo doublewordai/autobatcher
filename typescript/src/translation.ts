@@ -21,6 +21,9 @@ type ChatFunctionToolCall = Extract<
   >[number],
   { type: "function" }
 >;
+type ChatChoiceLogprobs = NonNullable<
+  ChatCompletion["choices"][number]["logprobs"]
+>;
 
 /** Strip transport options and merge extra_body into the API payload. */
 export function cleanParams(
@@ -418,13 +421,29 @@ export function responseToChatCompletion(
   const textParts: string[] = [];
   const refusals: string[] = [];
   const toolCalls: ChatFunctionToolCall[] = [];
+  const contentLogprobs: NonNullable<ChatChoiceLogprobs["content"]> = [];
 
   for (const item of response.output) {
     switch (item.type) {
       case "message":
         for (const part of item.content) {
-          if (part.type === "output_text") textParts.push(part.text);
-          else if (part.type === "refusal") refusals.push(part.refusal);
+          if (part.type === "output_text") {
+            textParts.push(part.text);
+            for (const logprob of part.logprobs ?? []) {
+              contentLogprobs.push({
+                token: logprob.token,
+                bytes: logprob.bytes,
+                logprob: logprob.logprob,
+                top_logprobs: logprob.top_logprobs.map((top) => ({
+                  token: top.token,
+                  bytes: top.bytes,
+                  logprob: top.logprob,
+                })),
+              });
+            }
+          } else if (part.type === "refusal") {
+            refusals.push(part.refusal);
+          }
         }
         break;
       case "function_call":
@@ -465,7 +484,10 @@ export function responseToChatCompletion(
       {
         index: 0,
         message,
-        logprobs: null,
+        logprobs:
+          contentLogprobs.length > 0
+            ? { content: contentLogprobs, refusal: null }
+            : null,
         finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
       },
     ],

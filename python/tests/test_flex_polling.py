@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -146,6 +147,56 @@ class TestFlexPolling:
             call.args for call in client._responses_api.retrieve.await_args_list
         ] == [("resp-test123",), ("resp-test123",)]
         client.files.create.assert_not_awaited()
+
+    async def test_flex_forwards_per_request_transport_options(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Headers, query parameters, and timeout must reach create and polls."""
+        queued = _response(status="queued", response_id="resp-options")
+        completed = _response(status="completed", response_id="resp-options")
+        client._poll_interval_seconds = 0
+        client._responses_api.create = AsyncMock(return_value=queued)
+        client._responses_api.retrieve = AsyncMock(return_value=completed)
+
+        await client._execute_flex(
+            endpoint="/v1/responses",
+            result_type=Response,
+            params={
+                "model": "test-model",
+                "input": "hello",
+                "extra_headers": {"X-Route": "tenant-a"},
+                "extra_query": {"region": "uk"},
+                "timeout": 12.5,
+            },
+        )
+
+        for awaited in (
+            client._responses_api.create.await_args,
+            client._responses_api.retrieve.await_args,
+        ):
+            assert awaited.kwargs["extra_headers"] == {"X-Route": "tenant-a"}
+            assert awaited.kwargs["extra_query"] == {"region": "uk"}
+            assert awaited.kwargs["timeout"] == 12.5
+
+    async def test_batch_mode_rejects_unusable_transport_options(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Batch JSONL cannot silently discard per-request transport controls."""
+        client._completion_window = "24h"
+
+        with pytest.raises(ValueError, match="transport options.*Batch|Batch.*transport"):
+            await asyncio.wait_for(
+                client._enqueue_request(
+                    endpoint="/v1/chat/completions",
+                    result_type=ChatCompletion,
+                    params={
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "timeout": 2.0,
+                    },
+                ),
+                timeout=0.02,
+            )
 
     @pytest.mark.parametrize("status", ["failed", "cancelled", "incomplete"])
     async def test_terminal_non_completed_response_raises(
@@ -295,6 +346,36 @@ class TestChatAdapters:
         assert result.usage.prompt_tokens_details.cached_tokens == 7
         assert result.usage.completion_tokens_details is not None
         assert result.usage.completion_tokens_details.reasoning_tokens == 3
+
+    def test_output_logprobs_are_preserved_in_chat_completion(self) -> None:
+        """A requested Responses logprob payload must survive chat adaptation."""
+        body = make_response_api_result(output_text="Hello")
+        body["output"][0]["content"][0]["logprobs"] = [
+            {
+                "token": "Hello",
+                "bytes": [72, 101, 108, 108, 111],
+                "logprob": -0.25,
+                "top_logprobs": [
+                    {
+                        "token": "Hi",
+                        "bytes": [72, 105],
+                        "logprob": -1.5,
+                    }
+                ],
+            }
+        ]
+        response = Response.model_validate(body)
+
+        result = client_module._response_to_chat_completion(response)
+
+        logprobs = result.choices[0].logprobs
+        assert logprobs is not None
+        assert logprobs.content is not None
+        assert logprobs.content[0].token == "Hello"
+        assert logprobs.content[0].bytes == [72, 101, 108, 108, 111]
+        assert logprobs.content[0].logprob == -0.25
+        assert logprobs.content[0].top_logprobs[0].token == "Hi"
+        assert logprobs.content[0].top_logprobs[0].logprob == -1.5
 
     def test_function_call_requires_a_real_call_id(self) -> None:
         """Regression: malformed calls must not become placeholder Chat tool IDs."""

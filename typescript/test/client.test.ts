@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 
 import type { Response } from "openai/resources/responses/responses";
@@ -10,6 +12,7 @@ import {
   chatParamsToResponse,
   responseToChatCompletion,
 } from "../src/client.ts";
+import { serve } from "../src/serve.ts";
 
 interface TranslationCase {
   name: string;
@@ -82,6 +85,24 @@ function makeClient(options: ConstructorParameters<typeof BatchOpenAI>[0] = {}) 
   });
 }
 
+function captureRejectedBatchSubmissions(client: BatchOpenAI) {
+  const uploads: string[] = [];
+  const endpoints: string[] = [];
+  (client as any)._files = {
+    create: async ({ file }: { file: File }) => {
+      uploads.push(await file.text());
+      return { id: `file-${uploads.length}` };
+    },
+  };
+  (client as any)._batches = {
+    create: async ({ endpoint }: { endpoint: string }) => {
+      endpoints.push(endpoint);
+      throw new Error("stop after capturing batch submission");
+    },
+  };
+  return { uploads, endpoints };
+}
+
 test("both public clients default text generation to flex", async () => {
   const batch = makeClient();
   const asyncClient = new AsyncOpenAI({
@@ -94,6 +115,52 @@ test("both public clients default text generation to flex", async () => {
   } finally {
     await batch.close();
     await asyncClient.close();
+  }
+});
+
+test("non-create Responses methods remain delegated to the OpenAI resource", async () => {
+  const client = makeClient();
+  const expected = makeResponse();
+  const retrieved: string[] = [];
+  (client as any)._responses.retrieve = async (id: string) => {
+    retrieved.push(id);
+    return expected;
+  };
+
+  try {
+    const result = await client.responses.retrieve("resp-existing");
+    assert.equal(result, expected);
+    assert.deepEqual(retrieved, ["resp-existing"]);
+  } finally {
+    await client.close();
+  }
+});
+
+test("stored Chat Completion methods remain delegated", async () => {
+  const requested: string[] = [];
+  const client = makeClient({
+    fetch: async (url) => {
+      requested.push(String(url));
+      return new globalThis.Response(
+        JSON.stringify({
+          id: "chatcmpl-existing",
+          object: "chat.completion",
+          created: 1_700_000_000,
+          model: "test-model",
+          choices: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+
+  try {
+    const result = await client.chat.completions.retrieve("chatcmpl-existing");
+    assert.equal(result.id, "chatcmpl-existing");
+    assert.equal(requested.length, 1);
+    assert.match(requested[0], /chat\/completions\/chatcmpl-existing/);
+  } finally {
+    await client.close();
   }
 });
 
@@ -224,6 +291,41 @@ test("refusal, service tier, and usage details survive chat adaptation", () => {
   assert.equal(completion.usage?.completion_tokens_details?.reasoning_tokens, 3);
 });
 
+test("output logprobs survive chat adaptation", () => {
+  const response = makeResponse();
+  const message = response.output[0];
+  assert.equal(message?.type, "message");
+  if (message?.type !== "message" || message.content[0]?.type !== "output_text") {
+    throw new Error("test response is not an output text message");
+  }
+  message.content[0].logprobs = [
+    {
+      token: "hello",
+      bytes: [104, 101, 108, 108, 111],
+      logprob: -0.25,
+      top_logprobs: [
+        { token: "hi", bytes: [104, 105], logprob: -1.5 },
+      ],
+    },
+  ];
+
+  const completion = responseToChatCompletion(response);
+
+  assert.deepEqual(completion.choices[0]?.logprobs, {
+    content: [
+      {
+        token: "hello",
+        bytes: [104, 101, 108, 108, 111],
+        logprob: -0.25,
+        top_logprobs: [
+          { token: "hi", bytes: [104, 105], logprob: -1.5 },
+        ],
+      },
+    ],
+    refusal: null,
+  });
+});
+
 test("function calls require a real call ID", () => {
   const response = makeResponse();
   response.output = [
@@ -276,6 +378,65 @@ test("flex responses submit in background and poll to completion", async () => {
       },
     ]);
     assert.deepEqual(retrieveIDs, ["resp-test", "resp-test"]);
+  } finally {
+    await client.close();
+  }
+});
+
+test("flex forwards per-request transport options to create and polls", async () => {
+  const client = makeClient();
+  const calls: Array<{ operation: string; options: unknown }> = [];
+  const queued = makeResponse("queued", "");
+  const completed = makeResponse("completed", "done");
+  (client as any)._responses = {
+    create: async (_body: unknown, options: unknown) => {
+      calls.push({ operation: "create", options });
+      return queued;
+    },
+    retrieve: async (_id: string, _query: unknown, options: unknown) => {
+      calls.push({ operation: "retrieve", options });
+      return completed;
+    },
+  };
+  const options = {
+    timeout: 12_500,
+    headers: { "X-Route": "tenant-a" },
+    query: { region: "uk" },
+  };
+
+  try {
+    await client.responses.create(
+      { model: "test-model", input: "hello" },
+      options,
+    );
+    assert.deepEqual(calls.map((call) => call.operation), [
+      "create",
+      "retrieve",
+    ]);
+    for (const call of calls) {
+      const forwarded = call.options as typeof options & { signal: AbortSignal };
+      assert.equal(forwarded.timeout, options.timeout);
+      assert.deepEqual(forwarded.headers, options.headers);
+      assert.deepEqual(forwarded.query, options.query);
+      assert.equal(forwarded.signal instanceof AbortSignal, true);
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+test("24h batch mode rejects per-request transport options", async () => {
+  const client = makeClient({ completionWindow: "24h", batchSize: 1 });
+  captureRejectedBatchSubmissions(client);
+
+  try {
+    await assert.rejects(
+      client.responses.create(
+        { model: "test-model", input: "hello" },
+        { timeout: 100 },
+      ),
+      /transport options.*Batch|Batch.*transport/,
+    );
   } finally {
     await client.close();
   }
@@ -372,5 +533,144 @@ test("explicit 24h text routes through the batch path", async () => {
     assert.deepEqual(calls, ["/v1/chat/completions"]);
   } finally {
     await client.close();
+  }
+});
+
+test("24h queues submit separate batches for separate endpoints", async () => {
+  const client = makeClient({
+    completionWindow: "24h",
+    batchSize: 10,
+    batchWindowSeconds: 60,
+  });
+  const captured = captureRejectedBatchSubmissions(client);
+  const requests = Promise.allSettled([
+    client._enqueue("/v1/chat/completions", {
+      model: "test-model",
+      messages: [{ role: "user", content: "hello" }],
+    }),
+    client._enqueue("/v1/embeddings", {
+      model: "embedding-model",
+      input: "hello",
+    }),
+  ]);
+
+  await client.close();
+  await requests;
+
+  assert.deepEqual(captured.endpoints.sort(), [
+    "/v1/chat/completions",
+    "/v1/embeddings",
+  ]);
+  const uploadedEndpoints = captured.uploads
+    .flatMap((upload) => upload.split("\n"))
+    .map((line) => JSON.parse(line).url)
+    .sort();
+  assert.deepEqual(uploadedEndpoints, [
+    "/v1/chat/completions",
+    "/v1/embeddings",
+  ]);
+});
+
+test("24h text batches force non-streaming JSONL bodies", async () => {
+  const client = makeClient({
+    completionWindow: "24h",
+    batchSize: 10,
+    batchWindowSeconds: 60,
+  });
+  const captured = captureRejectedBatchSubmissions(client);
+  const request = client._enqueue("/v1/responses", {
+    model: "test-model",
+    input: "hello",
+    stream: true,
+    stream_options: { include_usage: true },
+  });
+
+  await client.close();
+  await Promise.allSettled([request]);
+
+  const line = JSON.parse(captured.uploads[0]);
+  assert.equal(line.body.stream, false);
+  assert.equal("stream_options" in line.body, false);
+});
+
+test("close aborts active flex polling and cancels the upstream response", async () => {
+  const client = makeClient({ pollIntervalSeconds: 0.01 });
+  const queued = makeResponse("queued", "");
+  const completed = makeResponse("completed", "done");
+  const cancelled: string[] = [];
+  let allowCompletion = false;
+  (client as any)._responses = {
+    create: async () => queued,
+    retrieve: async () => (allowCompletion ? completed : queued),
+    cancel: async (id: string) => {
+      cancelled.push(id);
+      return { ...queued, status: "cancelled" };
+    },
+  };
+
+  const request = client.responses
+    .create({ model: "test-model", input: "hello" })
+    .then(
+      () => "resolved",
+      () => "rejected",
+    );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  try {
+    await client.close();
+    const outcome = await Promise.race([
+      request,
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve("still-polling"), 25),
+      ),
+    ]);
+
+    assert.equal(outcome, "rejected");
+    assert.deepEqual(cancelled, ["resp-test"]);
+  } finally {
+    allowCompletion = true;
+    await request;
+  }
+});
+
+test("HTTP proxy rejects oversized request bodies before parsing", async () => {
+  const { server, close } = serve({
+    apiKey: "sk-test",
+    baseURL: "https://api.test/v1",
+    host: "127.0.0.1",
+    port: 0,
+  });
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("test server did not expose a TCP address");
+  }
+  const body = "x".repeat(1024 * 1024 + 1);
+
+  try {
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const request = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: address.port,
+          path: "/v1/responses",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Connection: "close",
+          },
+        },
+        (response) => {
+          response.resume();
+          response.on("end", () => resolve(response.statusCode));
+        },
+      );
+      request.on("error", reject);
+      request.end(body);
+    });
+
+    assert.equal(status, 413);
+  } finally {
+    await close();
   }
 });

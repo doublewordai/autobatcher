@@ -78,6 +78,8 @@ class TestSubmitBatch:
             assert parsed["url"] == "/v1/chat/completions"
             assert "model" in parsed["body"]
             assert "messages" in parsed["body"]
+            assert parsed["body"]["stream"] is False
+            assert "stream_options" not in parsed["body"]
 
     async def test_files_create_called_with_batch_purpose(
         self, client: BatchOpenAI

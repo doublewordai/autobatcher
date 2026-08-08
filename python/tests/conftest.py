@@ -200,6 +200,11 @@ def client(mock_openai: AsyncMock) -> BatchOpenAI:
     c._window_tasks = {}
     c._active_batches = []
     c._poller_task = None
+    c._active_flex_tasks = set()
+    c._flex_response_ids = {}
+    c._chat_api = AsyncMock()
+    c._chat_api.completions = AsyncMock()
+    c._embeddings_api = AsyncMock()
     c._responses_api = AsyncMock()
     # Mock the internal httpx client that AsyncOpenAI.close() would call.
     # Since we skip __init__ via __new__, this isn't set up automatically.

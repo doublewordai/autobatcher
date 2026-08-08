@@ -161,6 +161,10 @@ shutdown behaviour — see the [Python README](python/README.md) for full detail
   minutes-scale latency and 24-hour batches may take longer.
 - Streaming is not supported. Requests that would normally stream are forced to
   non-streaming; the proxy can re-wrap results as SSE for consuming clients.
+- Per-request headers, query parameters, timeouts, and abort signals are
+  supported for flex calls. Batch calls reject transport options because they
+  cannot be represented in Batch API JSONL.
+- HTTP proxy request bodies are limited to 1 MiB.
 - Default flex polling is Doubleword-only. For OpenAI batch workloads, specify
   a 24-hour completion window; for realtime OpenAI requests, use the upstream
   OpenAI client directly.

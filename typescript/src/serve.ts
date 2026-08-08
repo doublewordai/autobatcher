@@ -38,6 +38,9 @@ const BATCHED_ROUTES = new Set([
   "/v1/embeddings",
   "/v1/responses",
 ]);
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+
+class PayloadTooLargeError extends Error {}
 
 function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
@@ -49,9 +52,26 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
+  const declaredLength = Number(req.headers["content-length"] ?? 0);
+  let tooLarge =
+    Number.isFinite(declaredLength) &&
+    declaredLength > MAX_REQUEST_BODY_BYTES;
+
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_REQUEST_BODY_BYTES) {
+      tooLarge = true;
+      chunks.length = 0;
+    }
+    if (!tooLarge) {
+      chunks.push(buffer);
+    }
+  }
+  if (tooLarge) {
+    throw new PayloadTooLargeError("Request body exceeds the 1 MiB limit");
   }
   return Buffer.concat(chunks).toString("utf-8");
 }
@@ -136,8 +156,12 @@ export function serve(options: ServeOptions): {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log("request_error", { url, error: message });
-      jsonResponse(res, 500, {
-        error: { message, type: "server_error" },
+      const status = err instanceof PayloadTooLargeError ? 413 : 500;
+      jsonResponse(res, status, {
+        error: {
+          message,
+          type: status === 413 ? "invalid_request_error" : "server_error",
+        },
       });
     }
   });

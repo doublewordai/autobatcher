@@ -175,6 +175,10 @@ unchanged — only the endpoints above are intercepted.
   minutes-scale latency and 24-hour batches may take longer.
 - Streaming is not supported. Requests with `stream: true` will have streaming
   stripped and results returned as a complete response.
+- Per-request headers, query parameters, timeouts, and abort signals are
+  forwarded for flex calls. Batch calls reject transport options because Batch
+  API JSONL cannot represent them.
+- The bundled HTTP proxy limits request bodies to 1 MiB.
 - Flex polling is Doubleword-only. OpenAI users must select `"24h"` for batch
   inference or use the upstream OpenAI client for realtime inference.
 - No automatic escalation to realtime if flex or batch inference is delayed.

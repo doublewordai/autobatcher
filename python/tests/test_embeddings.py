@@ -105,6 +105,8 @@ class TestEmbeddingsJSONL:
         assert line["method"] == "POST"
         assert line["body"]["model"] == "text-embedding-3-small"
         assert line["body"]["input"] == "hello world"
+        assert "stream" not in line["body"]
+        assert "stream_options" not in line["body"]
 
     async def test_batches_create_uses_embeddings_endpoint(
         self, client: BatchOpenAI
