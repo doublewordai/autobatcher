@@ -1,7 +1,7 @@
 {
   "name": "autobatcher",
   "version": "0.5.0",
-  "description": "Drop-in OpenAI client that transparently batches requests via the Batch API",
+  "description": "Drop-in OpenAI client for flex and batch inference",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -27,14 +27,16 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
+    "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "openai": ">=4.0.0 <7"
+    "openai": ">=4.104.0 <7"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "tsx": "^4.20.6",
     "tsdown": "^0.22.2",
     "typescript": "^5.7.0"
   },

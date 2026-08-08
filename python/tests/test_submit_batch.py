@@ -78,6 +78,8 @@ class TestSubmitBatch:
             assert parsed["url"] == "/v1/chat/completions"
             assert "model" in parsed["body"]
             assert "messages" in parsed["body"]
+            assert parsed["body"]["stream"] is False
+            assert "stream_options" not in parsed["body"]
 
     async def test_files_create_called_with_batch_purpose(
         self, client: BatchOpenAI
@@ -108,19 +110,21 @@ class TestSubmitBatch:
         assert call_kwargs["endpoint"] == "/v1/chat/completions"
         assert call_kwargs["completion_window"] == "24h"
 
-    async def test_batches_create_passes_through_arbitrary_completion_window(
+    async def test_non_24h_text_does_not_create_batch(
         self, client: BatchOpenAI
     ) -> None:
-        """Nonstandard completion_window values should be passed through unchanged."""
+        """Only an explicit 24h window may reach text batch creation."""
         file_obj = make_file_object("file-xyz")
         client.files.create.return_value = file_obj
         client._completion_window = "72h"
 
-        _add_pending(client, 1)
+        requests = _add_pending(client, 1)
         await client._submit_batch(EP)
 
-        call_kwargs = client.batches.create.call_args.kwargs
-        assert call_kwargs["completion_window"] == "72h"
+        client.files.create.assert_not_awaited()
+        client.batches.create.assert_not_awaited()
+        with pytest.raises(RuntimeError, match="only when completion_window='24h'"):
+            requests[0].future.result()
 
     async def test_batches_create_passes_metadata(
         self, client: BatchOpenAI

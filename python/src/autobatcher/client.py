@@ -1,8 +1,8 @@
 """
-BatchOpenAI: A drop-in replacement for AsyncOpenAI that uses the batch API.
+BatchOpenAI: A drop-in AsyncOpenAI replacement for flex and batch inference.
 
-Collects requests over a time window or until a size threshold, submits them
-as a batch, polls for results, and returns them to waiting callers.
+Text generation uses Doubleword background Responses polling by default.
+Embeddings and explicit 24-hour requests use the Batch API.
 
 Subclasses AsyncOpenAI so it passes isinstance checks and provides full
 access to non-batched endpoints (models, files, etc.) out of the box.
@@ -17,7 +17,7 @@ import uuid
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, Protocol, TypeVar
+from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
 import httpx
 import openai
@@ -28,6 +28,11 @@ from openai.types import CreateEmbeddingResponse
 from openai.types.responses import Response
 from openai import NotGiven
 from openai._types import Omit
+from openai.types.chat.completion_create_params import (
+    CompletionCreateParamsNonStreaming,
+)
+
+from ._translation import chat_params_to_response, response_to_chat_completion
 
 # Sentinel types the openai SDK uses for "not provided" parameters.
 # Both are non-JSON-serializable and must be stripped before batching.
@@ -36,6 +41,32 @@ _SENTINEL_TYPES = (NotGiven, Omit)
 # Keys that are transport-level client options, not request body fields.
 _TRANSPORT_KEYS = frozenset({
     "extra_headers", "extra_query", "timeout",
+})
+
+# Stable openai-python Responses.create keyword arguments. Provider extensions
+# and newer request fields travel through extra_body so the declared SDK method
+# signature cannot reject otherwise valid Doubleword parameters.
+_RESPONSE_CREATE_KEYS = frozenset({
+    "background",
+    "include",
+    "input",
+    "instructions",
+    "max_output_tokens",
+    "metadata",
+    "model",
+    "parallel_tool_calls",
+    "previous_response_id",
+    "reasoning",
+    "service_tier",
+    "store",
+    "stream",
+    "temperature",
+    "text",
+    "tool_choice",
+    "tools",
+    "top_p",
+    "truncation",
+    "user",
 })
 
 
@@ -70,6 +101,19 @@ def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _split_transport_options(
+    params: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Separate SDK request options from the JSON request body."""
+    body = dict(params)
+    options: dict[str, Any] = {}
+    for key in _TRANSPORT_KEYS:
+        value = body.pop(key, None)
+        if value is not None and not isinstance(value, _SENTINEL_TYPES):
+            options[key] = value
+    return _clean_params(body), options
+
+
 def _parse_retry_after(headers: httpx.Headers | dict[str, str], default: float = 60.0) -> float:
     """Extract retry delay in seconds from a Retry-After header.
 
@@ -82,6 +126,26 @@ def _parse_retry_after(headers: httpx.Headers | dict[str, str], default: float =
         except (ValueError, TypeError):
             pass
     return default
+
+
+def _chat_params_to_response(params: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility wrapper around the official-type request translator."""
+    cleaned = cast(CompletionCreateParamsNonStreaming, _clean_params(params))
+    return cast(dict[str, Any], chat_params_to_response(cleaned))
+
+
+def _response_create_kwargs(params: dict[str, Any]) -> dict[str, Any]:
+    """Split SDK-declared Responses fields from provider body extensions."""
+    declared = {k: v for k, v in params.items() if k in _RESPONSE_CREATE_KEYS}
+    extensions = {k: v for k, v in params.items() if k not in _RESPONSE_CREATE_KEYS}
+    if extensions:
+        declared["extra_body"] = extensions
+    return declared
+
+
+def _response_to_chat_completion(response: Response) -> ChatCompletion:
+    """Compatibility wrapper around the official-model response translator."""
+    return response_to_chat_completion(response)
 
 
 BatchEndpoint = Literal[
@@ -163,6 +227,10 @@ class _ChatCompletionsRawResponse:
     def __init__(self, completions: _BatchedChatCompletions) -> None:
         self._completions = completions
 
+    def __getattr__(self, name: str) -> Any:
+        upstream = self._completions._client._chat_api.completions.with_raw_response
+        return getattr(upstream, name)
+
     async def create(self, **kwargs: Any) -> _RawResponseWrapper[ChatCompletion]:
         result = await self._completions.create(**kwargs)
         return _RawResponseWrapper(result)
@@ -173,6 +241,10 @@ class _EmbeddingsRawResponse:
 
     def __init__(self, embeddings: _BatchedEmbeddings) -> None:
         self._embeddings = embeddings
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self._embeddings._client._embeddings_api.with_raw_response
+        return getattr(upstream, name)
 
     async def create(
         self, **kwargs: Any
@@ -186,6 +258,10 @@ class _ResponsesRawResponse:
 
     def __init__(self, responses: _BatchedResponses) -> None:
         self._responses = responses
+
+    def __getattr__(self, name: str) -> Any:
+        upstream = self._responses._client._responses_api.with_raw_response
+        return getattr(upstream, name)
 
     async def create(self, **kwargs: Any) -> _RawResponseWrapper[Response]:
         result = await self._responses.create(**kwargs)
@@ -206,6 +282,7 @@ class _ActiveBatch:
     created_at: float
     models: tuple[str, ...] = ()
     metadata: dict[str, str] = field(default_factory=dict)
+    completion_window: str = "24h"
     result_types: dict[str, type[_Validatable]] = field(default_factory=dict)  # custom_id -> result type
     last_offset: int = 0  # Track offset for partial result streaming
     last_status: str | None = None
@@ -223,6 +300,9 @@ class _BatchedChatCompletions:
 
     def __init__(self, client: BatchOpenAI):
         self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client._chat_api.completions, name)
 
     @property
     def with_raw_response(self) -> _ChatCompletionsRawResponse:
@@ -254,7 +334,11 @@ class _BatchedChat:
     """Proxy for chat namespace."""
 
     def __init__(self, client: BatchOpenAI):
+        self._client = client
         self.completions = _BatchedChatCompletions(client)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client._chat_api, name)
 
 
 class _BatchedEmbeddings:
@@ -262,6 +346,9 @@ class _BatchedEmbeddings:
 
     def __init__(self, client: BatchOpenAI):
         self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client._embeddings_api, name)
 
     @property
     def with_raw_response(self) -> _EmbeddingsRawResponse:
@@ -281,7 +368,7 @@ class _BatchedEmbeddings:
         """
         Create embeddings. The request is queued and batched.
 
-        Returns when the batch completes and results are available.
+        Returns when the embedding batch completes and results are available.
         """
         return await self._client._enqueue_request(
             endpoint="/v1/embeddings",
@@ -291,10 +378,14 @@ class _BatchedEmbeddings:
 
 
 class _BatchedResponses:
-    """Proxy for responses API that batches requests."""
+    """Proxy for Responses calls routed through flex or batch inference."""
 
     def __init__(self, client: BatchOpenAI):
         self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate non-create operations to the official Responses resource."""
+        return getattr(self._client._responses_api, name)
 
     @property
     def with_raw_response(self) -> _ResponsesRawResponse:
@@ -312,9 +403,9 @@ class _BatchedResponses:
         **kwargs: Any,
     ) -> Response:
         """
-        Create a response. The request is queued and batched.
+        Create a response using flex polling or an explicit 24-hour batch.
 
-        Returns when the batch completes and results are available.
+        Returns when flex polling or the explicit batch completes.
         """
         params: dict[str, Any] = {"model": model, **kwargs}
         if input is not None:
@@ -332,10 +423,10 @@ class _BatchedResponses:
 
 class BatchOpenAI(AsyncOpenAI):
     """
-    Drop-in replacement for AsyncOpenAI that uses the batch API.
+    Drop-in replacement for AsyncOpenAI using flex polling by default.
 
-    Requests are collected and submitted as batches based on size and time
-    thresholds. Results are polled and returned to waiting callers.
+    Text requests submit to Doubleword's background Responses API and poll by
+    response ID. Embeddings and explicit 24-hour requests use batch inference.
 
     Subclasses AsyncOpenAI, so it passes isinstance checks and provides
     full access to non-batched endpoints (models, files, etc.).
@@ -354,7 +445,7 @@ class BatchOpenAI(AsyncOpenAI):
             messages=[{"role": "user", "content": "Hello!"}],
         )
 
-        # Embeddings are also batched
+        # Embeddings always use 24-hour batches
         embeddings = await client.embeddings.create(
             model="text-embedding-3-small",
             input="Hello world",
@@ -369,7 +460,7 @@ class BatchOpenAI(AsyncOpenAI):
         batch_size: int = 1000,
         batch_window_seconds: float = 10.0,
         poll_interval_seconds: float = 5.0,
-        completion_window: str = "24h",
+        completion_window: str | None = None,
         batch_metadata: dict[str, str] | None = None,
         batch_event_handler: BatchEventHandler | None = None,
         cancel_active_batches_on_close: bool = False,
@@ -383,8 +474,8 @@ class BatchOpenAI(AsyncOpenAI):
             base_url: Base URL for the API (e.g., "https://api.doubleword.ai/v1")
             batch_size: Submit batch when this many requests are queued
             batch_window_seconds: Submit batch after this many seconds, even if size not reached
-            poll_interval_seconds: How often to poll for batch completion
-            completion_window: Batch completion window passed through to the upstream API
+            poll_interval_seconds: How often to poll flex responses or batches
+            completion_window: Set to "24h" for batch inference; otherwise use flex polling
             batch_metadata: Optional metadata attached to upstream batches
             batch_event_handler: Optional callback for structured batch lifecycle events
             cancel_active_batches_on_close: Best-effort cancel for in-flight upstream batches on close()
@@ -421,8 +512,16 @@ class BatchOpenAI(AsyncOpenAI):
         # Active batches being polled
         self._active_batches: list[_ActiveBatch] = []
         self._poller_task: asyncio.Task[None] | None = None
+        self._active_flex_tasks: set[asyncio.Task[Any]] = set()
+        self._flex_response_ids: dict[asyncio.Task[Any], str] = {}
 
-        # Override namespaces with batched proxies.
+        # Keep inherited resources so every operation other than create can be
+        # delegated unchanged after the intercepted proxies shadow them.
+        self._chat_api = self.chat
+        self._embeddings_api = self.embeddings
+        self._responses_api = self.responses
+
+        # Override intercepted namespaces with routing proxies.
         # Write to __dict__ directly to shadow the parent's cached_property
         # descriptors without triggering type-checker read-only errors.
         self.__dict__["chat"] = _BatchedChat(self)
@@ -459,6 +558,30 @@ class BatchOpenAI(AsyncOpenAI):
         if self._closed:
             raise RuntimeError("BatchOpenAI is closed")
 
+        if endpoint != "/v1/embeddings" and self._completion_window != "24h":
+            task = asyncio.create_task(
+                self._execute_flex(
+                    endpoint=endpoint,
+                    result_type=result_type,
+                    params=params,
+                ),
+                name=f"flex_poll_{endpoint}",
+            )
+            self._active_flex_tasks.add(task)
+            try:
+                return await task
+            finally:
+                self._active_flex_tasks.discard(task)
+                self._flex_response_ids.pop(task, None)
+
+        _, transport_options = _split_transport_options(params)
+        if transport_options:
+            names = ", ".join(sorted(transport_options))
+            raise ValueError(
+                f"Per-request transport options ({names}) cannot be represented "
+                "by the Batch API"
+            )
+
         loop = asyncio.get_running_loop()
         future: asyncio.Future[V] = loop.create_future()
 
@@ -491,6 +614,76 @@ class BatchOpenAI(AsyncOpenAI):
                 await self._submit_batch(endpoint)
 
         return await future
+
+    async def _execute_flex(
+        self,
+        *,
+        endpoint: BatchEndpoint,
+        result_type: type[V],
+        params: dict[str, Any],
+    ) -> V:
+        """Submit one background flex response and poll it to a terminal state."""
+        body_params, transport_options = _split_transport_options(params)
+        if endpoint == "/v1/chat/completions":
+            submit_params = _chat_params_to_response(body_params)
+        elif endpoint == "/v1/responses":
+            submit_params = body_params
+            submit_params.pop("stream_options", None)
+            submit_params["stream"] = False
+        else:
+            raise ValueError(f"Flex inference is not supported for {endpoint}")
+
+        submit_params["service_tier"] = "flex"
+        submit_params["background"] = True
+
+        response_id: str | None = None
+        current_task = asyncio.current_task()
+        try:
+            response = await self._responses_api.create(
+                **_response_create_kwargs(submit_params),
+                **transport_options,
+            )
+            if not isinstance(response, Response):
+                raise RuntimeError(
+                    "Flex submission returned an unexpected streaming response"
+                )
+            response_id = response.id
+            if current_task is not None:
+                self._flex_response_ids[current_task] = response_id
+
+            while response.status in {"queued", "in_progress"}:
+                await asyncio.sleep(self._poll_interval_seconds)
+                retrieved = await self._responses_api.retrieve(
+                    response.id, **transport_options
+                )
+                if not isinstance(retrieved, Response):
+                    raise RuntimeError(
+                        "Flex polling returned an unexpected streaming response"
+                    )
+                response = retrieved
+
+            if response.status != "completed":
+                detail = response.error.message if response.error else "no error details"
+                raise RuntimeError(
+                    f"Flex response {response.id} reached terminal status "
+                    f"{response.status}: {detail}"
+                )
+
+            if endpoint == "/v1/chat/completions":
+                return cast(V, _response_to_chat_completion(response))
+            return cast(V, response)
+        except asyncio.CancelledError:
+            if response_id is not None:
+                try:
+                    await asyncio.shield(self._responses_api.cancel(response_id))
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to cancel flex response {}: {}", response_id, exc
+                    )
+            raise
+        finally:
+            if current_task is not None:
+                self._flex_response_ids.pop(current_task, None)
 
     async def _window_timer(self, endpoint: str) -> None:
         """Timer that triggers batch submission after the window elapses."""
@@ -528,8 +721,10 @@ class BatchOpenAI(AsyncOpenAI):
         # Create JSONL content — each line uses the request's own endpoint
         lines = []
         for req in requests:
-            # Clean params for JSONL and force non-streaming
-            body = {**_clean_params(req.params), "stream": False}
+            body = _clean_params(req.params)
+            body.pop("stream_options", None)
+            if req.endpoint != "/v1/embeddings":
+                body["stream"] = False
             line = {
                 "custom_id": req.custom_id,
                 "method": "POST",
@@ -541,6 +736,15 @@ class BatchOpenAI(AsyncOpenAI):
 
         # Use the first request's endpoint for the top-level batches.create() call
         top_level_endpoint = requests[0].endpoint
+        batch_completion_window = "24h"
+        if top_level_endpoint != "/v1/embeddings" and self._completion_window != "24h":
+            error = RuntimeError(
+                "Text generation uses the Batch API only when completion_window='24h'"
+            )
+            for req in requests:
+                if not req.future.done():
+                    req.future.set_exception(error)
+            return
         models = tuple(sorted({
             model for req in requests for model in [req.params.get("model")] if isinstance(model, str)
         }))
@@ -567,14 +771,12 @@ class BatchOpenAI(AsyncOpenAI):
                     file_obj.seek(0)
             logger.debug("Uploaded batch file: {}", file_response.id)
 
-            # Create the batch (retry on rate limit).
-            # The openai SDK types `completion_window` narrowly, but some
-            # OpenAI-compatible providers accept additional values. Pass the
-            # caller-provided string through unchanged.
+            # Create a 24-hour batch. Flex text inference never reaches this path,
+            # and embeddings have no flex tier.
             batch_create_kwargs: dict[str, Any] = {
                 "input_file_id": file_response.id,
                 "endpoint": top_level_endpoint,
-                "completion_window": self._completion_window,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+                "completion_window": batch_completion_window,
             }
             if self._batch_metadata:
                 batch_create_kwargs["metadata"] = self._batch_metadata
@@ -605,6 +807,7 @@ class BatchOpenAI(AsyncOpenAI):
                 created_at=time.time(),
                 models=models,
                 metadata=dict(self._batch_metadata),
+                completion_window=batch_completion_window,
                 result_types={req.custom_id: req.result_type for req in requests},
             )
             self._active_batches.append(active_batch)
@@ -617,7 +820,7 @@ class BatchOpenAI(AsyncOpenAI):
                 error_file_id=batch_response.error_file_id,
                 request_count=len(requests),
                 models=list(models),
-                completion_window=self._completion_window,
+                completion_window=batch_completion_window,
                 metadata=dict(self._batch_metadata),
             )
 
@@ -635,7 +838,7 @@ class BatchOpenAI(AsyncOpenAI):
                 endpoint=top_level_endpoint,
                 request_count=len(requests),
                 models=list(models),
-                completion_window=self._completion_window,
+                completion_window=batch_completion_window,
                 metadata=dict(self._batch_metadata),
                 error=str(e),
             )
@@ -693,7 +896,7 @@ class BatchOpenAI(AsyncOpenAI):
                             },
                             status=status.status,
                             models=list(batch.models),
-                            completion_window=self._completion_window,
+                            completion_window=batch.completion_window,
                             metadata=dict(batch.metadata),
                             elapsed_seconds=round(time.time() - batch.created_at, 3),
                         )
@@ -720,7 +923,7 @@ class BatchOpenAI(AsyncOpenAI):
                                 "total": total_count,
                             },
                             models=list(batch.models),
-                            completion_window=self._completion_window,
+                            completion_window=batch.completion_window,
                             metadata=dict(batch.metadata),
                             elapsed_seconds=round(time.time() - batch.created_at, 3),
                         )
@@ -746,7 +949,7 @@ class BatchOpenAI(AsyncOpenAI):
                             },
                             status=status.status,
                             models=list(batch.models),
-                            completion_window=self._completion_window,
+                            completion_window=batch.completion_window,
                             metadata=dict(batch.metadata),
                             elapsed_seconds=round(time.time() - batch.created_at, 3),
                         )
@@ -890,6 +1093,19 @@ class BatchOpenAI(AsyncOpenAI):
             await asyncio.gather(self._poller_task, return_exceptions=True)
         self._poller_task = None
 
+        current_task = asyncio.current_task()
+        active_flex = [
+            task
+            for task in self._active_flex_tasks
+            if not task.done() and task is not current_task
+        ]
+        for task in active_flex:
+            task.cancel()
+        if active_flex:
+            await asyncio.gather(*active_flex, return_exceptions=True)
+        self._active_flex_tasks.clear()
+        self._flex_response_ids.clear()
+
         for endpoint, requests in self._pending.items():
             for req in requests:
                 if not req.future.done():
@@ -911,7 +1127,7 @@ class BatchOpenAI(AsyncOpenAI):
                     error_file_id=batch.error_file_id or None,
                     request_count=batch.request_count,
                     models=list(batch.models),
-                    completion_window=self._completion_window,
+                    completion_window=batch.completion_window,
                     metadata=dict(batch.metadata),
                 )
                 try:
@@ -946,7 +1162,7 @@ class BatchOpenAI(AsyncOpenAI):
 
 
 class AsyncOpenAI(BatchOpenAI):
-    """BatchOpenAI variant defaulting to 1h completion window (async inference)."""
+    """Compatibility alias for the default flex-inference client."""
 
-    def __init__(self, *, completion_window: str = "1h", **kwargs: Any):
+    def __init__(self, *, completion_window: str | None = None, **kwargs: Any):
         super().__init__(completion_window=completion_window, **kwargs)

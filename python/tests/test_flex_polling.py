@@ -1,0 +1,396 @@
+"""Tests for Doubleword flex background submission and polling."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+from openai.types.chat import ChatCompletion
+from openai.types.responses import Response
+
+import autobatcher.client as client_module
+from autobatcher import AsyncOpenAI as AutobatcherAsyncOpenAI
+from autobatcher.client import BatchOpenAI
+from tests.conftest import make_response_api_result
+
+
+TRANSLATION_CASES = json.loads(
+    (Path(__file__).parents[2] / "fixtures/chat_responses_translation.json").read_text()
+)
+
+
+def _response(
+    *,
+    status: str = "completed",
+    output_text: str = "Hello!",
+    response_id: str = "resp-test123",
+) -> Response:
+    body = make_response_api_result(output_text=output_text)
+    body["id"] = response_id
+    body["status"] = status
+    if status in {"queued", "in_progress"}:
+        body["output"] = []
+    return Response.model_validate(body)
+
+
+class TestFlexDefaults:
+    async def test_both_clients_default_to_flex_mode(self) -> None:
+        """Regression: neither public client should batch text by default."""
+        clients = [
+            BatchOpenAI(api_key="sk-test"),
+            AutobatcherAsyncOpenAI(api_key="sk-test"),
+        ]
+        try:
+            assert [client._completion_window for client in clients] == [None, None]
+        finally:
+            for client in clients:
+                await client.close()
+
+    async def test_non_24h_chat_routes_around_batch_queue(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Regression: flex chat must not upload JSONL or create a batch."""
+        expected = ChatCompletion.model_validate(
+            {
+                "id": "chatcmpl-flex",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "test-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        execute_flex = AsyncMock(return_value=expected)
+        client._execute_flex = execute_flex  # type: ignore[attr-defined]
+        client._completion_window = "1h"
+        client._batch_size = 1
+        client._submit_batch = AsyncMock(
+            side_effect=AssertionError("flex chat entered the batch queue")
+        )
+
+        result = await client._enqueue_request(
+            endpoint="/v1/chat/completions",
+            result_type=ChatCompletion,
+            params={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+        assert result is expected
+        execute_flex.assert_awaited_once()
+        client.files.create.assert_not_awaited()
+
+
+class TestFlexPolling:
+    async def test_doubleword_response_extensions_use_extra_body(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Regression: Doubleword-only fields must pass the SDK method boundary."""
+        completed = _response(status="completed")
+        client._responses_api.create = AsyncMock(return_value=completed)
+
+        await client._execute_flex(
+            endpoint="/v1/responses",
+            result_type=Response,
+            params={
+                "model": "test-model",
+                "input": "hello",
+                "frequency_penalty": 0.2,
+                "reasoning_effort": "medium",
+                "stop": ["DONE"],
+            },
+        )
+
+        assert client._responses_api.create.await_args.kwargs["extra_body"] == {
+            "frequency_penalty": 0.2,
+            "reasoning_effort": "medium",
+            "stop": ["DONE"],
+        }
+
+    async def test_responses_submit_in_background_and_poll_to_completion(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Regression: inference waits through GET polling, not an open POST."""
+        queued = _response(status="queued")
+        in_progress = _response(status="in_progress")
+        completed = _response(status="completed", output_text="done")
+        client._poll_interval_seconds = 0
+        client._responses_api.create = AsyncMock(return_value=queued)
+        client._responses_api.retrieve = AsyncMock(
+            side_effect=[in_progress, completed]
+        )
+
+        result = await client._execute_flex(
+            endpoint="/v1/responses",
+            result_type=Response,
+            params={"model": "test-model", "input": "hello", "stream": True},
+        )
+
+        assert result is completed
+        assert client._responses_api.create.await_args.kwargs == {
+            "model": "test-model",
+            "input": "hello",
+            "stream": False,
+            "service_tier": "flex",
+            "background": True,
+        }
+        assert [
+            call.args for call in client._responses_api.retrieve.await_args_list
+        ] == [("resp-test123",), ("resp-test123",)]
+        client.files.create.assert_not_awaited()
+
+    async def test_flex_forwards_per_request_transport_options(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Headers, query parameters, and timeout must reach create and polls."""
+        queued = _response(status="queued", response_id="resp-options")
+        completed = _response(status="completed", response_id="resp-options")
+        client._poll_interval_seconds = 0
+        client._responses_api.create = AsyncMock(return_value=queued)
+        client._responses_api.retrieve = AsyncMock(return_value=completed)
+
+        await client._execute_flex(
+            endpoint="/v1/responses",
+            result_type=Response,
+            params={
+                "model": "test-model",
+                "input": "hello",
+                "extra_headers": {"X-Route": "tenant-a"},
+                "extra_query": {"region": "uk"},
+                "timeout": 12.5,
+            },
+        )
+
+        for awaited in (
+            client._responses_api.create.await_args,
+            client._responses_api.retrieve.await_args,
+        ):
+            assert awaited.kwargs["extra_headers"] == {"X-Route": "tenant-a"}
+            assert awaited.kwargs["extra_query"] == {"region": "uk"}
+            assert awaited.kwargs["timeout"] == 12.5
+
+    async def test_batch_mode_rejects_unusable_transport_options(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Batch JSONL cannot silently discard per-request transport controls."""
+        client._completion_window = "24h"
+
+        with pytest.raises(ValueError, match="transport options.*Batch|Batch.*transport"):
+            await asyncio.wait_for(
+                client._enqueue_request(
+                    endpoint="/v1/chat/completions",
+                    result_type=ChatCompletion,
+                    params={
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "timeout": 2.0,
+                    },
+                ),
+                timeout=0.02,
+            )
+
+    @pytest.mark.parametrize("status", ["failed", "cancelled", "incomplete"])
+    async def test_terminal_non_completed_response_raises(
+        self, client: BatchOpenAI, status: str
+    ) -> None:
+        """Regression: terminal failures must not be returned as successes."""
+        terminal = _response(status=status, response_id="resp-terminal")
+        client._responses_api.create = AsyncMock(return_value=terminal)
+
+        with pytest.raises(
+            RuntimeError, match=rf"resp-terminal.*{status}|{status}.*resp-terminal"
+        ):
+            await client._execute_flex(
+                endpoint="/v1/responses",
+                result_type=Response,
+                params={"model": "test-model", "input": "hello"},
+            )
+
+
+class TestChatAdapters:
+    @pytest.mark.parametrize(
+        "case",
+        TRANSLATION_CASES,
+        ids=[case["name"] for case in TRANSLATION_CASES],
+    )
+    def test_chat_requests_match_shared_response_fixtures(self, case: dict) -> None:
+        """Regression: Python and TypeScript must emit the same typed wire shape."""
+        assert client_module._chat_params_to_response(case["chat_request"]) == case[
+            "response_request"
+        ]
+
+    def test_chat_params_translate_to_responses_fields(self) -> None:
+        """Regression: chat-only field names must not leak into Responses."""
+        translated = client_module._chat_params_to_response(
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_completion_tokens": 321,
+                "response_format": {"type": "json_object"},
+                "temperature": 0.4,
+                "stream": True,
+            }
+        )
+
+        assert translated == {
+            "model": "test-model",
+            "input": [{"role": "user", "content": "hello"}],
+            "max_output_tokens": 321,
+            "text": {"format": {"type": "json_object"}},
+            "temperature": 0.4,
+            "stream": False,
+        }
+
+    def test_chat_params_reject_multiple_choices(self) -> None:
+        """Regression: one Responses result cannot masquerade as n chat choices."""
+        with pytest.raises(ValueError, match="n=1"):
+            client_module._chat_params_to_response(
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "n": 2,
+                }
+            )
+
+    def test_chat_params_reject_custom_tools_outside_minimum_sdk_schema(self) -> None:
+        """Regression: transforms must stay inside the declared OpenAI 2.x types."""
+        with pytest.raises(ValueError, match="custom.*tool|tool.*custom"):
+            client_module._chat_params_to_response(
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tools": [
+                        {
+                            "type": "custom",
+                            "custom": {"name": "shell", "format": {"type": "text"}},
+                        }
+                    ],
+                }
+            )
+
+    def test_completed_response_converts_to_chat_completion(self) -> None:
+        """Regression: flex chat callers still receive ChatCompletion models."""
+        response = _response(status="completed", output_text="converted")
+
+        result = client_module._response_to_chat_completion(response)
+
+        assert isinstance(result, ChatCompletion)
+        assert result.id == "resp-test123"
+        assert result.object == "chat.completion"
+        assert result.choices[0].message.content == "converted"
+        assert result.choices[0].finish_reason == "stop"
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 10
+        assert result.usage.completion_tokens == 5
+
+    def test_function_call_converts_to_chat_tool_call(self) -> None:
+        """Regression: Responses function calls must survive chat adaptation."""
+        body = make_response_api_result(output_text="")
+        body["output"] = [
+            {
+                "type": "function_call",
+                "id": "fc-test",
+                "call_id": "call-test",
+                "name": "get_weather",
+                "arguments": '{"city":"London"}',
+                "status": "completed",
+            }
+        ]
+        response = Response.model_validate(body)
+
+        result = client_module._response_to_chat_completion(response)
+
+        tool_calls = result.choices[0].message.tool_calls
+        assert tool_calls is not None
+        assert tool_calls[0].id == "call-test"
+        assert tool_calls[0].function.name == "get_weather"
+        assert tool_calls[0].function.arguments == '{"city":"London"}'
+        assert result.choices[0].finish_reason == "tool_calls"
+
+    def test_refusal_service_tier_and_usage_details_are_preserved(self) -> None:
+        """Regression: typed response fields must not disappear during adaptation."""
+        body = make_response_api_result(output_text="")
+        body["service_tier"] = "priority"
+        body["output"] = [
+            {
+                "type": "message",
+                "id": "msg-refusal",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "refusal", "refusal": "I cannot help with that."}
+                ],
+            }
+        ]
+        body["usage"]["input_tokens_details"]["cached_tokens"] = 7
+        body["usage"]["output_tokens_details"]["reasoning_tokens"] = 3
+        response = Response.model_validate(body)
+
+        result = client_module._response_to_chat_completion(response)
+
+        message = result.choices[0].message
+        assert message.content is None
+        assert message.refusal == "I cannot help with that."
+        assert result.service_tier == "priority"
+        assert result.usage is not None
+        assert result.usage.prompt_tokens_details is not None
+        assert result.usage.prompt_tokens_details.cached_tokens == 7
+        assert result.usage.completion_tokens_details is not None
+        assert result.usage.completion_tokens_details.reasoning_tokens == 3
+
+    def test_output_logprobs_are_preserved_in_chat_completion(self) -> None:
+        """A requested Responses logprob payload must survive chat adaptation."""
+        body = make_response_api_result(output_text="Hello")
+        body["output"][0]["content"][0]["logprobs"] = [
+            {
+                "token": "Hello",
+                "bytes": [72, 101, 108, 108, 111],
+                "logprob": -0.25,
+                "top_logprobs": [
+                    {
+                        "token": "Hi",
+                        "bytes": [72, 105],
+                        "logprob": -1.5,
+                    }
+                ],
+            }
+        ]
+        response = Response.model_validate(body)
+
+        result = client_module._response_to_chat_completion(response)
+
+        logprobs = result.choices[0].logprobs
+        assert logprobs is not None
+        assert logprobs.content is not None
+        assert logprobs.content[0].token == "Hello"
+        assert logprobs.content[0].bytes == [72, 101, 108, 108, 111]
+        assert logprobs.content[0].logprob == -0.25
+        assert logprobs.content[0].top_logprobs[0].token == "Hi"
+        assert logprobs.content[0].top_logprobs[0].logprob == -1.5
+
+    def test_function_call_requires_a_real_call_id(self) -> None:
+        """Regression: malformed calls must not become placeholder Chat tool IDs."""
+        body = make_response_api_result(output_text="")
+        body["output"] = [
+            {
+                "type": "function_call",
+                "id": "fc-test",
+                "call_id": "",
+                "name": "get_weather",
+                "arguments": "{}",
+                "status": "completed",
+            }
+        ]
+        response = Response.model_validate(body)
+
+        with pytest.raises(ValueError, match="call_id"):
+            client_module._response_to_chat_completion(response)
