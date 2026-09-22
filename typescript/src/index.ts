@@ -12,7 +12,7 @@
  *   });
  */
 
-export { AsyncOpenAI, BatchOpenAI } from "./client.js";
+export { AsyncOpenAI, BatchOpenAI, FlexPollingError } from "./client.js";
 export type { BatchOpenAIOptions } from "./client.js";
 export { serve } from "./serve.js";
 export type { ServeOptions } from "./serve.js";

@@ -464,7 +464,15 @@ def response_to_chat_completion(response: Response) -> ChatCompletion:
                         if content_logprobs
                         else None
                     ),
-                    "finish_reason": "tool_calls" if tool_calls else "stop",
+                    "finish_reason": (
+                        "length"
+                        if response.incomplete_details
+                        and response.incomplete_details.reason == "max_output_tokens"
+                        else "content_filter"
+                        if response.incomplete_details
+                        and response.incomplete_details.reason == "content_filter"
+                        else "tool_calls" if tool_calls else "stop"
+                    ),
                 }
             ],
             "usage": usage,

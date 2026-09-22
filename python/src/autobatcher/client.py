@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import io
+import random
 import uuid
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
@@ -146,6 +147,24 @@ def _response_create_kwargs(params: dict[str, Any]) -> dict[str, Any]:
 def _response_to_chat_completion(response: Response) -> ChatCompletion:
     """Compatibility wrapper around the official-model response translator."""
     return response_to_chat_completion(response)
+
+
+class FlexPollingError(RuntimeError):
+    """Polling stopped; retrieve response_id to recover the accepted job."""
+
+    def __init__(self, response_id: str):
+        self.response_id = response_id
+        super().__init__(
+            f"Polling flex response {response_id} failed; "
+            "retrieve this ID to recover the result"
+        )
+
+
+def _retryable_poll_error(error: Exception) -> bool:
+    return isinstance(error, openai.APIConnectionError) or (
+        isinstance(error, openai.APIStatusError)
+        and (error.status_code in {404, 408, 409, 429} or error.status_code >= 500)
+    )
 
 
 BatchEndpoint = Literal[
@@ -461,6 +480,8 @@ class BatchOpenAI(AsyncOpenAI):
         batch_window_seconds: float = 10.0,
         poll_interval_seconds: float = 5.0,
         completion_window: str | None = None,
+        max_poll_retries: int = 5,
+        max_concurrent_requests: int = 20,
         batch_metadata: dict[str, str] | None = None,
         batch_event_handler: BatchEventHandler | None = None,
         cancel_active_batches_on_close: bool = False,
@@ -476,11 +497,25 @@ class BatchOpenAI(AsyncOpenAI):
             batch_window_seconds: Submit batch after this many seconds, even if size not reached
             poll_interval_seconds: How often to poll flex responses or batches
             completion_window: Set to "24h" for batch inference; otherwise use flex polling
+            max_poll_retries: Consecutive failed poll retries after SDK retries (default 5)
+            max_concurrent_requests: Simultaneous flex HTTP operations (default 20); sleeps do not occupy slots
             batch_metadata: Optional metadata attached to upstream batches
             batch_event_handler: Optional callback for structured batch lifecycle events
             cancel_active_batches_on_close: Best-effort cancel for in-flight upstream batches on close()
             **openai_kwargs: Additional arguments passed to AsyncOpenAI
         """
+        if (
+            isinstance(max_concurrent_requests, bool)
+            or not isinstance(max_concurrent_requests, int)
+            or max_concurrent_requests < 1
+        ):
+            raise ValueError("max_concurrent_requests must be a positive integer")
+        if (
+            isinstance(max_poll_retries, bool)
+            or not isinstance(max_poll_retries, int)
+            or max_poll_retries < 0
+        ):
+            raise ValueError("max_poll_retries must be a non-negative integer")
         super().__init__(
             api_key=api_key,
             base_url=base_url,
@@ -493,6 +528,8 @@ class BatchOpenAI(AsyncOpenAI):
         self._batch_window_seconds = batch_window_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._completion_window = completion_window
+        self._max_poll_retries = max_poll_retries
+        self._flex_http_slots = asyncio.Semaphore(max_concurrent_requests)
         self._batch_metadata = dict(batch_metadata or {})
         self._batch_event_handler = batch_event_handler
         self._cancel_active_batches_on_close = cancel_active_batches_on_close
@@ -615,6 +652,11 @@ class BatchOpenAI(AsyncOpenAI):
 
         return await future
 
+    async def _flex_request(self, request: Callable[[], Awaitable[V]]) -> V:
+        # Hold a slot only for HTTP work, never while waiting between polls.
+        async with self._flex_http_slots:
+            return await request()
+
     async def _execute_flex(
         self,
         *,
@@ -639,9 +681,10 @@ class BatchOpenAI(AsyncOpenAI):
         response_id: str | None = None
         current_task = asyncio.current_task()
         try:
-            response = await self._responses_api.create(
-                **_response_create_kwargs(submit_params),
-                **transport_options,
+            response = await self._flex_request(
+                lambda: self._responses_api.create(
+                    **_response_create_kwargs(submit_params), **transport_options
+                )
             )
             if not isinstance(response, Response):
                 raise RuntimeError(
@@ -651,18 +694,33 @@ class BatchOpenAI(AsyncOpenAI):
             if current_task is not None:
                 self._flex_response_ids[current_task] = response_id
 
+            failures = 0
+            delay = self._poll_interval_seconds
             while response.status in {"queued", "in_progress"}:
-                await asyncio.sleep(self._poll_interval_seconds)
-                retrieved = await self._responses_api.retrieve(
-                    response.id, **transport_options
-                )
+                await asyncio.sleep(delay * random.uniform(1.0, 1.2))
+                try:
+                    retrieved = await self._flex_request(
+                        lambda: self._responses_api.retrieve(
+                            cast(str, response_id), **transport_options
+                        )
+                    )
+                except Exception as exc:
+                    if not _retryable_poll_error(exc) or failures >= self._max_poll_retries:
+                        raise FlexPollingError(response_id) from exc
+                    failures += 1
+                    delay = min(60.0, self._poll_interval_seconds * 2 ** min(failures, 10))
+                    if isinstance(exc, openai.APIStatusError):
+                        delay = max(delay, _parse_retry_after(exc.response.headers, default=0.0))
+                    continue
+                failures = 0
+                delay = self._poll_interval_seconds
                 if not isinstance(retrieved, Response):
                     raise RuntimeError(
                         "Flex polling returned an unexpected streaming response"
                     )
                 response = retrieved
 
-            if response.status != "completed":
+            if response.status not in {"completed", "incomplete"}:
                 detail = response.error.message if response.error else "no error details"
                 raise RuntimeError(
                     f"Flex response {response.id} reached terminal status "
@@ -675,7 +733,11 @@ class BatchOpenAI(AsyncOpenAI):
         except asyncio.CancelledError:
             if response_id is not None:
                 try:
-                    await asyncio.shield(self._responses_api.cancel(response_id))
+                    await asyncio.shield(self._flex_request(
+                        lambda: self._responses_api.cancel(
+                            cast(str, response_id), **transport_options
+                        )
+                    ))
                 except Exception as exc:
                     logger.warning(
                         "Failed to cancel flex response {}: {}", response_id, exc

@@ -52,6 +52,25 @@ export interface BatchOpenAIOptions extends OpenAIClientOptions {
   pollIntervalSeconds?: number;
   /** Set to "24h" for batch inference; otherwise use flex polling (default). */
   completionWindow?: string;
+  /** Consecutive failed poll retries after SDK retries (default 5). */
+  maxPollRetries?: number;
+  /** Maximum simultaneous flex HTTP operations, excluding poll sleeps (default 20). */
+  maxConcurrentRequests?: number;
+}
+
+/** An accepted job can still be retrieved using responseId after polling fails. */
+export class FlexPollingError extends Error {
+  constructor(public readonly responseId: string, public readonly cause: unknown) {
+    super(`Polling flex response ${responseId} failed; retrieve this ID to recover the result`);
+    this.name = "FlexPollingError";
+  }
+}
+
+function retryablePollError(error: unknown): boolean {
+  return error instanceof OpenAI.APIConnectionError || (
+    error instanceof OpenAI.APIError && error.status !== undefined &&
+    ([404, 408, 409, 429].includes(error.status) || error.status >= 500)
+  );
 }
 
 interface PendingRequest {
@@ -155,6 +174,10 @@ export class BatchOpenAI extends OpenAI {
   private readonly _batchSize: number;
   private readonly _batchWindowSeconds: number;
   private readonly _pollIntervalSeconds: number;
+  private readonly _maxPollRetries: number;
+  private readonly _maxConcurrentRequests: number;
+  private _flexHttpActive = 0;
+  private _flexHttpWaiters: Array<() => void> = [];
   private readonly _completionWindow: string | undefined;
 
   private _pending = new Map<string, PendingRequest[]>();
@@ -177,8 +200,16 @@ export class BatchOpenAI extends OpenAI {
   private readonly _embeddings: OpenAI["embeddings"];
 
   constructor(options: BatchOpenAIOptions = {}) {
-    const { batchSize, batchWindowSeconds, pollIntervalSeconds, completionWindow, ...openaiOpts } = options;
+    const { batchSize, batchWindowSeconds, pollIntervalSeconds, completionWindow, maxPollRetries = 5, maxConcurrentRequests = 20, ...openaiOpts } = options;
+    if (!Number.isInteger(maxPollRetries) || maxPollRetries < 0) {
+      throw new Error("maxPollRetries must be a non-negative integer");
+    }
+    if (!Number.isInteger(maxConcurrentRequests) || maxConcurrentRequests < 1) {
+      throw new Error("maxConcurrentRequests must be a positive integer");
+    }
     super(openaiOpts);
+    this._maxConcurrentRequests = maxConcurrentRequests;
+    this._maxPollRetries = maxPollRetries;
 
     this._batchSize = batchSize ?? 1000;
     this._batchWindowSeconds = batchWindowSeconds ?? 10;
@@ -326,6 +357,36 @@ export class BatchOpenAI extends OpenAI {
     });
   }
 
+  private async _flexRequest<T>(request: () => PromiseLike<T>, signal?: AbortSignal | null): Promise<T> {
+    if (signal?.aborted) throw abortError(signal);
+    if (this._flexHttpActive >= this._maxConcurrentRequests) {
+      await new Promise<void>((resolve, reject) => {
+        const wake = () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const onAbort = () => {
+          const index = this._flexHttpWaiters.indexOf(wake);
+          if (index !== -1) this._flexHttpWaiters.splice(index, 1);
+          reject(abortError(signal!));
+        };
+        this._flexHttpWaiters.push(wake);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    } else {
+      this._flexHttpActive++;
+    }
+    try {
+      if (signal?.aborted) throw abortError(signal);
+      return await request();
+    } finally {
+      // Transfer this slot directly to the oldest waiter.
+      const next = this._flexHttpWaiters.shift();
+      if (next) next();
+      else this._flexHttpActive--;
+    }
+  }
+
   private async _executeFlex(
     endpoint: string,
     params: Record<string, unknown>,
@@ -346,17 +407,35 @@ export class BatchOpenAI extends OpenAI {
     submitParams.background = true;
 
     try {
-      let response = await this._responses.create(
+      let response = await this._flexRequest(() => this._responses.create(
         submitParams as unknown as ResponseCreateParamsNonStreaming,
         options,
-      );
+      ), options?.signal);
       if (operation) operation.responseId = response.id;
+      const responseId = response.id;
+      let failures = 0;
+      let delay = this._pollIntervalSeconds;
       while (response.status === "queued" || response.status === "in_progress") {
-        await sleep(this._pollIntervalSeconds * 1000, options?.signal);
-        response = await this._responses.retrieve(response.id, undefined, options);
+        await sleep(delay * (1 + Math.random() * 0.2) * 1000, options?.signal);
+        try {
+          response = await this._flexRequest(() => this._responses.retrieve(responseId, undefined, options), options?.signal);
+        } catch (error) {
+          if (options?.signal?.aborted) throw error;
+          if (!retryablePollError(error) || failures >= this._maxPollRetries) {
+            throw new FlexPollingError(responseId, error);
+          }
+          failures++;
+          delay = Math.min(60, this._pollIntervalSeconds * 2 ** Math.min(failures, 10));
+          if (error instanceof OpenAI.APIError) {
+            delay = Math.max(delay, parseRetryAfter(error.headers, 0));
+          }
+          continue;
+        }
+        failures = 0;
+        delay = this._pollIntervalSeconds;
       }
 
-      if (response.status !== "completed") {
+      if (response.status !== "completed" && response.status !== "incomplete") {
         const detail = response.error?.message ?? "no error details";
         throw new Error(
           `Flex response ${response.id} reached terminal status ${response.status}: ${detail}`,
@@ -369,7 +448,7 @@ export class BatchOpenAI extends OpenAI {
     } catch (error) {
       if (options?.signal?.aborted && operation?.responseId) {
         try {
-          await this._responses.cancel(operation.responseId);
+          await this._flexRequest(() => this._responses.cancel(operation.responseId!, { ...options, signal: undefined }));
         } catch {
           // Preserve the caller's cancellation error if upstream cleanup fails.
         }

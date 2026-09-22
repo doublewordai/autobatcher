@@ -488,7 +488,12 @@ export function responseToChatCompletion(
           contentLogprobs.length > 0
             ? { content: contentLogprobs, refusal: null }
             : null,
-        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+        finish_reason:
+          response.incomplete_details?.reason === "max_output_tokens"
+            ? "length"
+            : response.incomplete_details?.reason === "content_filter"
+              ? "content_filter"
+              : toolCalls.length > 0 ? "tool_calls" : "stop",
       },
     ],
     usage: response.usage

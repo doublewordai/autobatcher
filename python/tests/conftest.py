@@ -189,6 +189,8 @@ def client(mock_openai: AsyncMock) -> BatchOpenAI:
     c._batch_size = 3
     c._batch_window_seconds = 0.05
     c._poll_interval_seconds = 0.05
+    c._max_poll_retries = 5
+    c._flex_http_slots = asyncio.Semaphore(20)
     c._completion_window = "24h"
     c._batch_metadata = {}
     c._batch_event_handler = None

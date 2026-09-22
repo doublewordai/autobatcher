@@ -442,7 +442,7 @@ test("24h batch mode rejects per-request transport options", async () => {
   }
 });
 
-for (const status of ["failed", "cancelled", "incomplete"] as const) {
+for (const status of ["failed", "cancelled"] as const) {
   test(`terminal ${status} flex response rejects`, async () => {
     const client = makeClient();
     const terminal = makeResponse(status);
@@ -673,4 +673,172 @@ test("HTTP proxy rejects oversized request bodies before parsing", async () => {
   } finally {
     await close();
   }
+});
+
+
+for (const [reason, finish] of [["max_output_tokens", "length"], ["content_filter", "content_filter"]] as const) {
+  test(`incomplete ${reason} preserves output and usage`, async () => {
+    const client = makeClient();
+    const terminal = makeResponse();
+    terminal.status = "incomplete";
+    terminal.incomplete_details = { reason };
+    (client as any)._responses = { create: async () => terminal };
+    try {
+      const raw = await client.responses.create({model: "test", input: "hello"});
+      assert.equal(raw.status, "incomplete");
+      const chat = await client.chat.completions.create({model: "test", messages: []});
+      assert.equal(chat.choices[0].message.content, "hello");
+      assert.equal(chat.choices[0].finish_reason, finish);
+      assert.equal(chat.usage?.total_tokens, 15);
+    } finally { await client.close(); }
+  });
+}
+
+for (const status of [undefined, 404, 408, 409, 429, 503]) {
+  test(`poll recovers from ${status} without resubmitting`, async () => {
+    const { default: OpenAI } = await import("openai");
+    const client = makeClient();
+    let submissions = 0;
+    const ids: string[] = [];
+    (client as any)._responses = {
+      create: async () => { submissions++; return makeResponse("queued"); },
+      retrieve: async (id: string) => {
+        ids.push(id);
+        if (ids.length === 1) throw status === undefined
+          ? new OpenAI.APIConnectionError({message: "temporary"})
+          : new OpenAI.APIError(status, undefined, "temporary", undefined);
+        return makeResponse("completed", "recovered");
+      },
+    };
+    try {
+      const result = await client.responses.create({model: "test", input: "hello"});
+      assert.equal(result.output_text, "recovered");
+      assert.equal(submissions, 1);
+      assert.deepEqual(ids, ["resp-test", "resp-test"]);
+    } finally { await client.close(); }
+  });
+}
+
+for (const [status, attempts] of [[503, 3], [401, 1]]) {
+  test(`poll failure ${status} retains ID and cause`, async () => {
+    const { default: OpenAI } = await import("openai");
+    const client = makeClient({maxPollRetries: 2});
+    const error = new OpenAI.APIError(status, undefined, "unavailable", undefined);
+    let polls = 0;
+    let submissions = 0;
+    (client as any)._responses = {
+      create: async () => { submissions++; return makeResponse("queued"); },
+      retrieve: async () => { polls++; throw error; },
+    };
+    try {
+      await assert.rejects(client.responses.create({model: "test", input: "hello"}), (caught: any) => {
+        assert.equal(caught.responseId, "resp-test");
+        assert.equal(caught.cause, error);
+        return true;
+      });
+      assert.equal(polls, attempts);
+      assert.equal(submissions, 1);
+    } finally { await client.close(); }
+  });
+}
+
+test("flex HTTP limit releases slots between polls", async () => {
+  const client = makeClient({maxConcurrentRequests: 1});
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const submissions: string[] = [];
+  let active = 0;
+  let peak = 0;
+  (client as any)._responses = {
+    create: async (body: {input: string}) => {
+      active++; peak = Math.max(peak, active);
+      submissions.push(body.input);
+      await gate;
+      active--;
+      return {...makeResponse("queued"), id: body.input};
+    },
+    retrieve: async (id: string) => {
+      active++; peak = Math.max(peak, active);
+      await Promise.resolve();
+      active--;
+      assert.equal(submissions.length, 3);
+      return {...makeResponse(), id};
+    },
+  };
+  const pending = ["0", "1", "2"].map(input => client.responses.create({model: "test", input}));
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(submissions, ["0"]);
+    release();
+    assert.deepEqual((await Promise.all(pending)).map(r => r.id), ["0", "1", "2"]);
+    assert.equal(peak, 1);
+  } finally { release(); await Promise.allSettled(pending); await client.close(); }
+});
+
+test("aborting a waiting submission does not send it or leak a slot", async () => {
+  const client = makeClient({maxConcurrentRequests: 1});
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const submissions: string[] = [];
+  (client as any)._responses = {
+    create: async (body: {input: string}) => { submissions.push(body.input); await gate; return makeResponse(); },
+  };
+  const first = client.responses.create({model: "test", input: "first"});
+  const controller = new AbortController();
+  const second = client.responses.create({model: "test", input: "cancelled"}, {signal: controller.signal});
+  const rejected = assert.rejects(second);
+  controller.abort();
+  release();
+  try {
+    await rejected;
+    await first;
+    await client.responses.create({model: "test", input: "last"});
+    assert.deepEqual(submissions, ["first", "last"]);
+  } finally { await client.close(); }
+});
+
+test("poll backoff resets and honors Retry-After", async (t) => {
+  const { default: OpenAI } = await import("openai");
+  const client = makeClient({pollIntervalSeconds: 5, maxPollRetries: 1});
+  const delays: number[] = [];
+  const nativeTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (fn: () => void, delay: number) => {
+    delays.push(delay / 1000);
+    return nativeTimeout(fn, 0);
+  });
+  const unavailable = new OpenAI.APIError(503, undefined, "busy", undefined);
+  const limited = new OpenAI.APIError(429, undefined, "busy", new Headers({"Retry-After": "20"}) as any);
+  const replies = [unavailable, makeResponse("queued"), limited, makeResponse()];
+  (client as any)._responses = {
+    create: async () => makeResponse("queued"),
+    retrieve: async () => { const result = replies.shift(); if (result instanceof Error) throw result; return result; },
+  };
+  try {
+    const result = await client.responses.create({model: "test", input: "hello"});
+    assert.equal(result.status, "completed");
+    assert.equal(delays.length, 4);
+    [5, 10, 5, 20].forEach((minimum, i) => assert.ok(delays[i] >= minimum && delays[i] <= minimum * 1.2));
+  } finally { await client.close(); }
+});
+
+for (const [option, value] of [["maxConcurrentRequests", 0], ["maxConcurrentRequests", 1.5], ["maxPollRetries", -1], ["maxPollRetries", 1.5]] as const) {
+  test(`rejects invalid ${option}=${value}`, () => {
+    assert.throws(() => makeClient({[option]: value}), new RegExp(option));
+  });
+}
+
+test("cancel preserves transport options without the aborted signal", async () => {
+  const client = makeClient({pollIntervalSeconds: 60});
+  const options = {headers: {Authorization: "Bearer tenant"}, query: {region: "uk"}, timeout: 2000};
+  let cancelledOptions: any;
+  (client as any)._responses = {
+    create: async () => makeResponse("queued"),
+    cancel: async (_id: string, opts: unknown) => { cancelledOptions = opts; return makeResponse("cancelled"); },
+  };
+  const task = client.responses.create({model: "test", input: "hello"}, options);
+  const rejected = assert.rejects(task);
+  await new Promise(resolve => setImmediate(resolve));
+  await client.close();
+  await rejected;
+  assert.deepEqual(cancelledOptions, {...options, signal: undefined});
 });

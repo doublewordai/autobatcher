@@ -198,7 +198,7 @@ class TestFlexPolling:
                 timeout=0.02,
             )
 
-    @pytest.mark.parametrize("status", ["failed", "cancelled", "incomplete"])
+    @pytest.mark.parametrize("status", ["failed", "cancelled"])
     async def test_terminal_non_completed_response_raises(
         self, client: BatchOpenAI, status: str
     ) -> None:
@@ -394,3 +394,172 @@ class TestChatAdapters:
 
         with pytest.raises(ValueError, match="call_id"):
             client_module._response_to_chat_completion(response)
+
+
+@pytest.mark.parametrize("reason, finish", [("max_output_tokens", "length"), ("content_filter", "content_filter")])
+async def test_incomplete_preserves_output_and_usage(reason, finish):
+    client = BatchOpenAI(api_key="test", poll_interval_seconds=0)
+    terminal = _response(status="incomplete", output_text="partial")
+    terminal = Response.model_validate({**terminal.model_dump(), "incomplete_details": {"reason": reason}})
+    client._responses_api.create = AsyncMock(return_value=terminal)
+    try:
+        raw = await client.responses.create(model="test", input="hello")
+        assert raw.status == "incomplete"
+        assert raw.output[0].content[0].text == "partial"
+        chat = await client.chat.completions.create(model="test", messages=[])
+        assert chat.choices[0].message.content == "partial"
+        assert chat.choices[0].finish_reason == finish
+        assert chat.usage.total_tokens == 15
+    finally:
+        await client.close()
+
+@pytest.mark.parametrize("status", [None, 404, 408, 409, 429, 503])
+async def test_poll_recovers_without_resubmitting(status):
+    import httpx
+    import openai
+    client = BatchOpenAI(api_key="test", poll_interval_seconds=0)
+    request = httpx.Request("GET", "https://api.test/responses/resp-test123")
+    error = (openai.APIConnectionError(request=request) if status is None else
+             openai.APIStatusError("temporary", response=httpx.Response(status, request=request), body=None))
+    client._responses_api.create = AsyncMock(return_value=_response(status="queued"))
+    client._responses_api.retrieve = AsyncMock(side_effect=[error, _response(output_text="recovered")])
+    try:
+        result = await client.responses.create(model="test", input="hello")
+        assert result.output[0].content[0].text == "recovered"
+        assert client._responses_api.create.await_count == 1
+        assert [call.args[0] for call in client._responses_api.retrieve.await_args_list] == ["resp-test123"] * 2
+    finally:
+        await client.close()
+
+@pytest.mark.parametrize("status, attempts", [(503, 3), (401, 1)])
+async def test_poll_failure_retains_id_and_cause(status, attempts):
+    import httpx
+    import openai
+    client = BatchOpenAI(api_key="test", poll_interval_seconds=0, max_poll_retries=2)
+    error = openai.APIStatusError("unavailable", response=httpx.Response(status, request=httpx.Request("GET", "https://api.test")), body=None)
+    client._responses_api.create = AsyncMock(return_value=_response(status="queued"))
+    client._responses_api.retrieve = AsyncMock(side_effect=error)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await client.responses.create(model="test", input="hello")
+        assert caught.value.response_id == "resp-test123"
+        assert caught.value.__cause__ is error
+        assert client._responses_api.retrieve.await_count == attempts
+        assert client._responses_api.create.await_count == 1
+    finally:
+        await client.close()
+
+async def test_flex_http_limit_releases_slots_between_polls():
+    client = BatchOpenAI(api_key="test", poll_interval_seconds=0, max_concurrent_requests=1)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    submissions = []
+    active = 0
+    peak = 0
+
+    async def create(**params):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        submissions.append(params["input"])
+        started.set()
+        await release.wait()
+        active -= 1
+        return _response(status="queued", response_id=params["input"])
+
+    async def retrieve(response_id, **options):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        # All submissions can proceed while previous jobs await completion.
+        assert len(submissions) == 3
+        return _response(response_id=response_id)
+
+    client._responses_api.create = create
+    client._responses_api.retrieve = retrieve
+    tasks = [asyncio.create_task(client.responses.create(model="test", input=str(i))) for i in range(3)]
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        await asyncio.sleep(0)
+        assert submissions == ["0"]
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks), 1)
+        assert [r.id for r in results] == ["0", "1", "2"]
+        assert peak == 1
+    finally:
+        release.set()
+        await client.close()
+
+async def test_cancelling_a_waiting_submission_does_not_send_it():
+    client = BatchOpenAI(api_key="test", poll_interval_seconds=0, max_concurrent_requests=1)
+    started, release = asyncio.Event(), asyncio.Event()
+    submissions = []
+    async def create(**params):
+        submissions.append(params["input"])
+        started.set()
+        await release.wait()
+        return _response()
+    client._responses_api.create = create
+    first = asyncio.create_task(client.responses.create(model="test", input="first"))
+    await asyncio.wait_for(started.wait(), 1)
+    second = asyncio.create_task(client.responses.create(model="test", input="cancelled"))
+    await asyncio.sleep(0)
+    second.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        release.set()
+        await first
+        await client.responses.create(model="test", input="last")
+        assert submissions == ["first", "last"]
+    finally:
+        release.set()
+        await client.close()
+
+async def test_poll_backoff_resets_and_honors_retry_after(monkeypatch):
+    import httpx
+    import openai
+    client = BatchOpenAI(api_key="test", poll_interval_seconds=5, max_poll_retries=1)
+    delays = []
+    async def sleep(delay):
+        delays.append(delay)
+    monkeypatch.setattr(client_module.asyncio, "sleep", sleep)
+    request = httpx.Request("GET", "https://api.test")
+    unavailable = openai.APIStatusError("busy", response=httpx.Response(503, request=request), body=None)
+    limited = openai.APIStatusError("busy", response=httpx.Response(429, request=request, headers={"Retry-After": "20"}), body=None)
+    client._responses_api.create = AsyncMock(return_value=_response(status="queued"))
+    client._responses_api.retrieve = AsyncMock(side_effect=[unavailable, _response(status="queued"), limited, _response()])
+    try:
+        result = await client.responses.create(model="test", input="hello")
+        assert result.status == "completed"
+        assert len(delays) == 4
+        for delay, minimum in zip(delays, [5, 10, 5, 20]):
+            assert minimum <= delay <= minimum * 1.2
+    finally:
+        await client.close()
+
+@pytest.mark.parametrize("option,value", [("max_concurrent_requests", 0), ("max_concurrent_requests", 1.5), ("max_poll_retries", -1), ("max_poll_retries", 1.5)])
+def test_invalid_flex_limits_rejected(option, value):
+    with pytest.raises(ValueError, match=option):
+        BatchOpenAI(api_key="test", **{option: value})
+
+async def test_cancel_preserves_transport_options():
+    client = BatchOpenAI(api_key="test", poll_interval_seconds=60)
+    submitted = asyncio.Event()
+    async def create(**params):
+        submitted.set()
+        return _response(status="queued")
+    client._responses_api.create = create
+    client._responses_api.cancel = AsyncMock(return_value=_response(status="cancelled"))
+    options = {"extra_headers": {"Authorization": "Bearer tenant"}, "extra_query": {"region": "uk"}, "timeout": 2}
+    task = asyncio.create_task(client.responses.create(model="test", input="hello", **options))
+    await submitted.wait()
+    try:
+        await client.close()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        client._responses_api.cancel.assert_awaited_once_with("resp-test123", **options)
+    finally:
+        await client.close()

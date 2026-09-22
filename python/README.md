@@ -248,6 +248,8 @@ autobatcher serve --keep-active-batches-on-close
 | `batch_size` | `1000` | Submit batch when this many requests are queued |
 | `batch_window_seconds` | `10.0` | Submit batch after this many seconds |
 | `poll_interval_seconds` | `5.0` | How often to poll flex responses or batch completion |
+| `max_concurrent_requests` | `20` | Maximum simultaneous flex HTTP operations per client |
+| `max_poll_retries` | `5` | Consecutive failed poll retries after SDK retries |
 | `completion_window` | `None` | Set to `"24h"` for text-generation batches |
 | `batch_metadata` | `None` | Optional metadata attached to each upstream batch |
 | `cancel_active_batches_on_close` | `False` | Best-effort cancel active upstream batches when closing the client |
@@ -257,6 +259,39 @@ autobatcher serve --keep-active-batches-on-close
 An omitted value (and legacy `"1h"`) selects Doubleword flex polling for text
 generation. Exactly `"24h"` selects the Batch API. Embeddings always use a
 24-hour batch, irrespective of this setting.
+
+### Flex polling and recovery
+
+Flex HTTP operations are limited to 20 per client by default. A waiting response
+holds no slot between polls, so other agents can still submit work. This limit
+covers flex submission, retrieval, and cancellation; it does not limit queued
+server jobs, Batch API operations, or calls made directly to inherited resources.
+
+Flex polling adds 0–20% jitter to the configured interval. Connection errors and
+HTTP 404, 408, 409, 429, and 5xx responses retry the same response ID, with
+exponential backoff capped at 60 seconds before jitter (or a longer numeric
+`Retry-After`). Up to five consecutive retries are allowed after the OpenAI SDK's
+own per-call retries; a successful poll resets the counter. Submission is never
+repeated by this polling retry loop. Transport timeouts apply per HTTP call,
+not to the entire inference job.
+
+Incomplete Responses are returned with their partial output and usage. Chat
+completions map `max_output_tokens` to `finish_reason="length"` and
+`content_filter` to `finish_reason="content_filter"`.
+
+```python
+from autobatcher import FlexPollingError
+
+try:
+    response = await client.responses.create(model=model, input=prompt)
+except FlexPollingError as exc:
+    # Retrieve this accepted job; do not resubmit the prompt.
+    response = await client.responses.retrieve(exc.response_id)
+```
+
+Manual retrieval returns the current status, which may still be `queued` or
+`in_progress`. Continue retrieving the same ID until terminal. The original
+polling error is available through `__cause__`.
 
 ## Supported endpoints
 
