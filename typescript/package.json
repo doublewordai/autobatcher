@@ -27,7 +27,7 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test test/client.test.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },

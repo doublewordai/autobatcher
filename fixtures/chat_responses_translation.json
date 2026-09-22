@@ -35,7 +35,9 @@
             "name": "weather",
             "description": "Get weather",
             "parameters": {
-              "type": "object"
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
             },
             "strict": true
           }
@@ -74,7 +76,9 @@
           "name": "weather",
           "description": "Get weather",
           "parameters": {
-            "type": "object"
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
           },
           "strict": true
         }
@@ -149,7 +153,9 @@
           "name": "answer",
           "description": "Structured answer",
           "schema": {
-            "type": "object"
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
           },
           "strict": true
         }
@@ -170,7 +176,9 @@
           "name": "answer",
           "description": "Structured answer",
           "schema": {
-            "type": "object"
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
           },
           "strict": true
         },

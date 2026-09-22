@@ -34,17 +34,19 @@ class TestSubclass:
         assert isinstance(client.responses, _BatchedResponses)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["retrieve", "cancel", "delete"])
     async def test_non_create_response_methods_delegate_to_openai_resource(
-        self, client: BatchOpenAI
+        self, client: BatchOpenAI, method: str
     ) -> None:
         """Replacing responses.create must not hide retrieve/cancel/delete."""
         expected = object()
-        client._responses_api.retrieve = AsyncMock(return_value=expected)
+        operation = AsyncMock(return_value=expected)
+        setattr(client._responses_api, method, operation)
 
-        result = await client.responses.retrieve("resp-existing")
+        result = await getattr(client.responses, method)("resp-existing")
 
         assert result is expected
-        client._responses_api.retrieve.assert_awaited_once_with("resp-existing")
+        operation.assert_awaited_once_with("resp-existing")
 
     @pytest.mark.asyncio
     async def test_non_create_chat_completion_methods_delegate(
@@ -66,7 +68,7 @@ class TestSubclass:
     async def test_raw_non_create_response_methods_delegate(
         self, client: BatchOpenAI
     ) -> None:
-        """The raw-response facade must only override create()."""
+        """The raw-response facade preserves retrieval; create is covered in test_with_raw_response."""
         expected = object()
         retrieve = AsyncMock(return_value=expected)
         client._responses_api.with_raw_response = SimpleNamespace(

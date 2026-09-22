@@ -52,28 +52,39 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
-  const declaredLength = Number(req.headers["content-length"] ?? 0);
-  let tooLarge =
-    Number.isFinite(declaredLength) &&
-    declaredLength > MAX_REQUEST_BODY_BYTES;
-
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  for await (const chunk of req) {
-    const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-    totalBytes += buffer.byteLength;
-    if (totalBytes > MAX_REQUEST_BODY_BYTES) {
-      tooLarge = true;
-      chunks.length = 0;
-    }
-    if (!tooLarge) {
+  const tooLarge = () => new PayloadTooLargeError("Request body exceeds the 1 MiB limit");
+  if (Number(req.headers["content-length"] ?? 0) > MAX_REQUEST_BODY_BYTES) {
+    req.pause();
+    throw tooLarge();
+  }
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    const cleanup = () => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("aborted", onAborted);
+    };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onAborted = () => onError(new Error("Request aborted"));
+    const onEnd = () => { cleanup(); resolve(Buffer.concat(chunks).toString("utf-8")); };
+    const onData = (chunk: Buffer | string) => {
+      const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      totalBytes += buffer.byteLength;
+      if (totalBytes > MAX_REQUEST_BODY_BYTES) {
+        req.pause();
+        cleanup();
+        reject(tooLarge());
+        return;
+      }
       chunks.push(buffer);
-    }
-  }
-  if (tooLarge) {
-    throw new PayloadTooLargeError("Request body exceeds the 1 MiB limit");
-  }
-  return Buffer.concat(chunks).toString("utf-8");
+    };
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onError);
+    req.once("aborted", onAborted);
+  });
 }
 
 function log(event: string, data: Record<string, unknown> = {}): void {
@@ -157,6 +168,9 @@ export function serve(options: ServeOptions): {
       const message = err instanceof Error ? err.message : String(err);
       log("request_error", { url, error: message });
       const status = err instanceof PayloadTooLargeError ? 413 : 500;
+      if (status === 413) {
+        res.setHeader("Connection", "close");
+      }
       jsonResponse(res, status, {
         error: {
           message,

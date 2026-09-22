@@ -132,7 +132,15 @@ def _parse_retry_after(headers: httpx.Headers | dict[str, str], default: float =
 def _chat_params_to_response(params: dict[str, Any]) -> dict[str, Any]:
     """Compatibility wrapper around the official-type request translator."""
     cleaned = cast(CompletionCreateParamsNonStreaming, _clean_params(params))
-    return cast(dict[str, Any], chat_params_to_response(cleaned))
+    result = cast(dict[str, Any], chat_params_to_response(cleaned))
+    extra = params.get("extra_body")
+    if isinstance(extra, dict):
+        # These Chat fields are translated or intentionally removed above.
+        consumed = {"messages", "max_tokens", "max_completion_tokens", "response_format",
+                    "reasoning_effort", "verbosity", "logprobs", "tools", "tool_choice",
+                    "n", "stream", "stream_options", "modalities"}
+        result = {**{k: v for k, v in extra.items() if k not in consumed}, **result}
+    return result
 
 
 def _response_create_kwargs(params: dict[str, Any]) -> dict[str, Any]:
@@ -314,6 +322,21 @@ class _ActiveBatch:
 # Proxy classes that intercept .create() and route to batching
 # ---------------------------------------------------------------------------
 
+class _StreamingResponseFacade:
+    """Keep non-create streaming helpers without bypassing inference routing."""
+
+    def __init__(self, upstream: Any):
+        self._upstream = upstream
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._upstream, name)
+
+    def create(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError(
+            "with_streaming_response.create is not supported; use create() for flex or batch inference"
+        )
+
+
 class _BatchedChatCompletions:
     """Proxy for chat.completions that batches create() calls."""
 
@@ -321,6 +344,8 @@ class _BatchedChatCompletions:
         self._client = client
 
     def __getattr__(self, name: str) -> Any:
+        if name == "with_streaming_response":
+            return _StreamingResponseFacade(self._client._chat_api.completions.with_streaming_response)
         return getattr(self._client._chat_api.completions, name)
 
     @property
@@ -367,6 +392,8 @@ class _BatchedEmbeddings:
         self._client = client
 
     def __getattr__(self, name: str) -> Any:
+        if name == "with_streaming_response":
+            return _StreamingResponseFacade(self._client._embeddings_api.with_streaming_response)
         return getattr(self._client._embeddings_api, name)
 
     @property
@@ -404,6 +431,8 @@ class _BatchedResponses:
 
     def __getattr__(self, name: str) -> Any:
         """Delegate non-create operations to the official Responses resource."""
+        if name == "with_streaming_response":
+            return _StreamingResponseFacade(self._client._responses_api.with_streaming_response)
         return getattr(self._client._responses_api, name)
 
     @property
@@ -550,7 +579,6 @@ class BatchOpenAI(AsyncOpenAI):
         self._active_batches: list[_ActiveBatch] = []
         self._poller_task: asyncio.Task[None] | None = None
         self._active_flex_tasks: set[asyncio.Task[Any]] = set()
-        self._flex_response_ids: dict[asyncio.Task[Any], str] = {}
 
         # Keep inherited resources so every operation other than create can be
         # delegated unchanged after the intercepted proxies shadow them.
@@ -609,7 +637,6 @@ class BatchOpenAI(AsyncOpenAI):
                 return await task
             finally:
                 self._active_flex_tasks.discard(task)
-                self._flex_response_ids.pop(task, None)
 
         _, transport_options = _split_transport_options(params)
         if transport_options:
@@ -667,7 +694,7 @@ class BatchOpenAI(AsyncOpenAI):
         """Submit one background flex response and poll it to a terminal state."""
         body_params, transport_options = _split_transport_options(params)
         if endpoint == "/v1/chat/completions":
-            submit_params = _chat_params_to_response(body_params)
+            submit_params = _chat_params_to_response(params)
         elif endpoint == "/v1/responses":
             submit_params = body_params
             submit_params.pop("stream_options", None)
@@ -679,7 +706,6 @@ class BatchOpenAI(AsyncOpenAI):
         submit_params["background"] = True
 
         response_id: str | None = None
-        current_task = asyncio.current_task()
         try:
             response = await self._flex_request(
                 lambda: self._responses_api.create(
@@ -691,8 +717,6 @@ class BatchOpenAI(AsyncOpenAI):
                     "Flex submission returned an unexpected streaming response"
                 )
             response_id = response.id
-            if current_task is not None:
-                self._flex_response_ids[current_task] = response_id
 
             failures = 0
             delay = self._poll_interval_seconds
@@ -743,9 +767,6 @@ class BatchOpenAI(AsyncOpenAI):
                         "Failed to cancel flex response {}: {}", response_id, exc
                     )
             raise
-        finally:
-            if current_task is not None:
-                self._flex_response_ids.pop(current_task, None)
 
     async def _window_timer(self, endpoint: str) -> None:
         """Timer that triggers batch submission after the window elapses."""
@@ -1166,7 +1187,6 @@ class BatchOpenAI(AsyncOpenAI):
         if active_flex:
             await asyncio.gather(*active_flex, return_exceptions=True)
         self._active_flex_tasks.clear()
-        self._flex_response_ids.clear()
 
         for endpoint, requests in self._pending.items():
             for req in requests:

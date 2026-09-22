@@ -53,17 +53,17 @@ class TestClose:
         queued = Response.model_validate(body)
         client._completion_window = None
         client._poll_interval_seconds = 60
-        client._responses_api.create = AsyncMock(return_value=queued)
+        submitted = asyncio.Event()
+        async def create(**params):
+            submitted.set()
+            return queued
+        client._responses_api.create = AsyncMock(side_effect=create)
         client._responses_api.cancel = AsyncMock(return_value=queued)
 
         request = asyncio.create_task(
             client.responses.create(model="test-model", input="hello")
         )
-        for _ in range(10):
-            if client._responses_api.create.await_count:
-                break
-            await asyncio.sleep(0)
-        assert client._responses_api.create.await_count == 1
+        await asyncio.wait_for(submitted.wait(), 1)
 
         try:
             await client.close()

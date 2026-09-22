@@ -64,6 +64,8 @@ class TestSubmitBatch:
     async def test_jsonl_format(self, client: BatchOpenAI) -> None:
         """Each JSONL line must have custom_id, method, url, and body."""
         reqs = _add_pending(client, 2)
+        for req in reqs:
+            req.params.update(stream=True, stream_options={"include_usage": True})
         await client._submit_batch(EP)
 
         file_tuple = client.files.create.call_args.kwargs["file"]

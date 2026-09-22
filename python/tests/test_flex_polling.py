@@ -563,3 +563,33 @@ async def test_cancel_preserves_transport_options():
         client._responses_api.cancel.assert_awaited_once_with("resp-test123", **options)
     finally:
         await client.close()
+
+@pytest.mark.parametrize("resource", ["chat", "responses", "embeddings"])
+async def test_streaming_create_cannot_bypass_routing(resource):
+    client = BatchOpenAI(api_key="test")
+    try:
+        proxy = client.chat.completions if resource == "chat" else getattr(client, resource)
+        with pytest.raises(NotImplementedError, match="streaming"):
+            proxy.with_streaming_response.create(model="test")
+    finally:
+        await client.close()
+
+
+def test_filename_without_file_content_is_rejected():
+    with pytest.raises(ValueError, match="file data or an ID"):
+        client_module._chat_params_to_response({"model": "test", "messages": [{"role": "user", "content": [{"type": "file", "file": {"filename": "test.txt"}}]}]})
+
+
+async def test_chat_extra_body_extensions_survive_translation():
+    client = BatchOpenAI(api_key="test")
+    client._responses_api.create = AsyncMock(return_value=_response())
+    try:
+        await client.chat.completions.create(model="test", messages=[], extra_body={"vendor_option": {"enabled": True}, "max_tokens": 12, "stream": True, "modalities": ["text"]})
+        sent = client._responses_api.create.call_args.kwargs
+        assert sent["extra_body"]["vendor_option"] == {"enabled": True}
+        assert sent["max_output_tokens"] == 12
+        assert sent["stream"] is False
+        assert "max_tokens" not in sent["extra_body"]
+        assert "modalities" not in sent["extra_body"]
+    finally:
+        await client.close()

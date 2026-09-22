@@ -99,7 +99,7 @@ def _input_content(
                 value = file.get(key)
                 if value is not None:
                     converted_file[key] = value
-            if len(converted_file) == 1:
+            if file.get("file_data") is None and file.get("file_id") is None:
                 raise ValueError(f"{parameter} file content requires file data or an ID")
             converted.append(converted_file)
         elif part_type == "input_audio":

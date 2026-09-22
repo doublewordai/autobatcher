@@ -355,7 +355,17 @@ export function chatParamsToResponse(
     throw new Error("Chat completions require messages");
   }
 
+  const extra = (params as Record<string, unknown>).extra_body;
+  const consumed = new Set([
+    "messages", "max_tokens", "max_completion_tokens", "response_format",
+    "reasoning_effort", "verbosity", "logprobs", "tools", "tool_choice",
+    "n", "stream", "stream_options", "modalities",
+  ]);
+  const extensions = extra && typeof extra === "object" && !Array.isArray(extra)
+    ? Object.fromEntries(Object.entries(extra).filter(([key]) => !consumed.has(key)))
+    : {};
   const result: Record<string, unknown> = {
+    ...extensions,
     model: source.model,
     input: messagesToResponseInput(source.messages),
     stream: false,

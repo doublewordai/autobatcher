@@ -185,10 +185,11 @@ shutdown behaviour — see the [Python README](python/README.md) for full detail
 
 - Not suitable for real-time or interactive use cases. Flex work has
   minutes-scale latency and 24-hour batches may take longer.
-- Streaming is not supported. Requests that would normally stream are forced to
+- Streaming is not supported. Python `with_streaming_response.create()` is
+  explicitly rejected to prevent bypassing flex/batch routing. Requests that would normally stream are forced to
   non-streaming; the proxy can re-wrap results as SSE for consuming clients.
-- Per-request headers, query parameters, timeouts, and abort signals are
-  supported for flex calls. Batch calls reject transport options because they
+- Per-request headers, query parameters, and timeouts are supported for flex
+  calls. TypeScript supports AbortSignal; Python uses asyncio task cancellation. Batch calls reject transport options because they
   cannot be represented in Batch API JSONL.
 - HTTP proxy request bodies are limited to 1 MiB.
 - Default flex polling is Doubleword-only. For OpenAI batch workloads, specify

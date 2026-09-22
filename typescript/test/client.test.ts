@@ -110,8 +110,18 @@ test("both public clients default text generation to flex", async () => {
     baseURL: "https://api.test/v1",
   });
   try {
-    assert.equal((batch as any)._completionWindow, undefined);
-    assert.equal((asyncClient as any)._completionWindow, undefined);
+    for (const client of [batch, asyncClient]) {
+      const sent: Record<string, unknown>[] = [];
+      (client as any)._responses = {create: async (body: Record<string, unknown>) => {
+        sent.push(body);
+        return makeResponse("completed", "flex result");
+      }};
+      const result = await client.chat.completions.create({model: "test", messages: []});
+      assert.equal(result.choices[0].message.content, "flex result");
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].background, true);
+      assert.equal(sent[0].service_tier, "flex");
+    }
   } finally {
     await batch.close();
     await asyncClient.close();
@@ -657,16 +667,19 @@ test("HTTP proxy rejects oversized request bodies before parsing", async () => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(body),
             Connection: "close",
           },
         },
         (response) => {
           response.resume();
-          response.on("end", () => resolve(response.statusCode));
+          response.on("end", () => { request.destroy(); resolve(response.statusCode); });
         },
       );
       request.on("error", reject);
-      request.end(body);
+      request.setTimeout(1000, () => { request.destroy(); reject(new Error("missing 413 response")); });
+      // The declared size alone should trigger 413 before any upload bytes.
+      request.flushHeaders();
     });
 
     assert.equal(status, 413);
@@ -841,4 +854,34 @@ test("cancel preserves transport options without the aborted signal", async () =
   await client.close();
   await rejected;
   assert.deepEqual(cancelledOptions, {...options, signal: undefined});
+});
+
+test("chat extra_body extensions survive translation", async () => {
+  const result = chatParamsToResponse({model: "test", messages: [], extra_body: {vendor_option: {enabled: true}, max_tokens: 12, stream: true, modalities: ["text"]}} as any);
+  assert.deepEqual(result.vendor_option, {enabled: true});
+  assert.equal(result.max_output_tokens, 12);
+  assert.equal(result.stream, false);
+  assert.equal(result.max_tokens, undefined);
+  assert.equal(result.modalities, undefined);
+});
+
+test("proxy rejects oversized chunked uploads before the sender finishes", async () => {
+  const {server, close} = serve({apiKey: "test", baseURL: "https://api.test/v1", host: "127.0.0.1", port: 0});
+  await once(server, "listening");
+  const address = server.address() as {port: number};
+  let req: ReturnType<typeof httpRequest>;
+  try {
+    const result = await new Promise<{status: number | undefined; connection: string | undefined}>((resolve, reject) => {
+      req = httpRequest({host: "127.0.0.1", port: address.port, path: "/v1/responses", method: "POST", headers: {"Transfer-Encoding": "chunked"}}, res => {
+        res.resume();
+        resolve({status: res.statusCode, connection: res.headers.connection});
+      });
+      req.on("error", reject);
+      req.setTimeout(1000, () => { req.destroy(); reject(new Error("proxy waited for upload completion")); });
+      req.write("x".repeat(1024 * 1024 + 1));
+      // Deliberately never end the upload.
+    });
+    assert.equal(result.status, 413);
+    assert.equal(result.connection, "close");
+  } finally { req!.destroy(); await close(); }
 });
