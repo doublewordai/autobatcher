@@ -1,6 +1,6 @@
 {
   "name": "autobatcher",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Drop-in OpenAI client for flex and batch inference",
   "license": "MIT",
   "type": "module",
