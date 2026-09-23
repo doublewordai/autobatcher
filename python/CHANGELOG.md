@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.10.0...autobatcher-v0.11.0) (2026-09-23)
+
+
+### Features
+
+* use flex polling for async inference ([#48](https://github.com/doublewordai/autobatcher/issues/48)) ([8e86bdc](https://github.com/doublewordai/autobatcher/commit/8e86bdc5526d76be2e5679a300c68797996db44a))
+
 ## [0.10.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.9.0...autobatcher-v0.10.0) (2026-04-23)
 
 
