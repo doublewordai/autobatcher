@@ -32,7 +32,7 @@ const command = positionals[0];
 
 if (values.help || !command) {
   console.log(`
-autobatcher — OpenAI-compatible HTTP proxy with transparent batching
+autobatcher — OpenAI-compatible HTTP proxy for flex and batch inference
 
 Usage:
   autobatcher serve [options]
@@ -81,7 +81,7 @@ const { close } = serve({
   batchSize: parseInt(values["batch-size"]!, 10),
   batchWindowSeconds: parseInt(values["batch-window"]!, 10),
   pollIntervalSeconds: parseInt(values["poll-interval"]!, 10),
-  completionWindow: values.mode === "batch" ? "24h" : "1h",
+  completionWindow: values.mode === "batch" ? "24h" : undefined,
 });
 
 // Graceful shutdown

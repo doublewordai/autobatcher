@@ -5,9 +5,9 @@ Usage:
     autobatcher serve --base-url https://api.doubleword.ai/v1 --api-key sk-... --port 8080
 
 Clients talk to http://localhost:8080/v1/chat/completions (etc.) and requests
-are transparently batched via the batch API. Streaming requests are accepted —
-the batch is made non-streaming upstream and the complete response is re-wrapped
-as an SSE stream for the caller.
+use flex background polling by default. Embeddings and explicit 24-hour mode use
+the Batch API. Streaming requests are accepted — upstream work is non-streaming
+and the complete response is re-wrapped as an SSE stream for the caller.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ def run_server(
     batch_size: int = 1000,
     batch_window_seconds: float = 10.0,
     poll_interval_seconds: float = 5.0,
-    completion_window: str = "24h",
+    completion_window: str | None = None,
     batch_metadata: dict[str, str] | None = None,
     cancel_active_batches_on_close: bool = True,
 ) -> None:
@@ -193,7 +193,7 @@ def run_server(
         batch_size=batch_size,
         batch_window_seconds=batch_window_seconds,
         poll_interval_seconds=poll_interval_seconds,
-        completion_window=completion_window,  # type: ignore[arg-type]
+        completion_window=completion_window,
         batch_metadata=batch_metadata,
         batch_event_handler=_stdout_batch_event_handler,
         cancel_active_batches_on_close=cancel_active_batches_on_close,

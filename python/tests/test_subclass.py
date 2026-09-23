@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 from openai import AsyncOpenAI
 
 from autobatcher.client import BatchOpenAI
@@ -28,3 +32,50 @@ class TestSubclass:
         assert isinstance(client.chat, _BatchedChat)
         assert isinstance(client.embeddings, _BatchedEmbeddings)
         assert isinstance(client.responses, _BatchedResponses)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["retrieve", "cancel", "delete"])
+    async def test_non_create_response_methods_delegate_to_openai_resource(
+        self, client: BatchOpenAI, method: str
+    ) -> None:
+        """Replacing responses.create must not hide retrieve/cancel/delete."""
+        expected = object()
+        operation = AsyncMock(return_value=expected)
+        setattr(client._responses_api, method, operation)
+
+        result = await getattr(client.responses, method)("resp-existing")
+
+        assert result is expected
+        operation.assert_awaited_once_with("resp-existing")
+
+    @pytest.mark.asyncio
+    async def test_non_create_chat_completion_methods_delegate(
+        self, client: BatchOpenAI
+    ) -> None:
+        """Stored completion operations must remain available after interception."""
+        expected = object()
+        retrieve = AsyncMock(return_value=expected)
+        client._chat_api = SimpleNamespace(
+            completions=SimpleNamespace(retrieve=retrieve)
+        )
+
+        result = await client.chat.completions.retrieve("chatcmpl-existing")
+
+        assert result is expected
+        retrieve.assert_awaited_once_with("chatcmpl-existing")
+
+    @pytest.mark.asyncio
+    async def test_raw_non_create_response_methods_delegate(
+        self, client: BatchOpenAI
+    ) -> None:
+        """The raw-response facade preserves retrieval; create is covered in test_with_raw_response."""
+        expected = object()
+        retrieve = AsyncMock(return_value=expected)
+        client._responses_api.with_raw_response = SimpleNamespace(
+            retrieve=retrieve
+        )
+
+        result = await client.responses.with_raw_response.retrieve("resp-existing")
+
+        assert result is expected
+        retrieve.assert_awaited_once_with("resp-existing")

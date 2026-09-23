@@ -1,7 +1,7 @@
 # autobatcher — Agent & Developer Guide
 
 This repo contains two SDKs that implement the same concept: a drop-in OpenAI
-client replacement that transparently batches requests via the Batch API.
+client replacement for flex background polling and 24-hour batch inference.
 
 ```
 autobatcher/
@@ -25,10 +25,15 @@ Specifically:
 
 - **Same constructor parameters** (snake_case in Python, camelCase in TypeScript)
 - **Same defaults** — `batchSize: 1000`, `batchWindowSeconds: 10`,
-  `pollIntervalSeconds: 5`, `completionWindow: "1h"`
-- **Same batch lifecycle** — queue → JSONL → file upload → batch create → poll → fetch results → resolve
+  `pollIntervalSeconds: 5`, completion window unset
+- **Same flex lifecycle** — Responses create with `service_tier: "flex"` and
+  `background: true` → poll response ID → adapt result → resolve
+- **Same batch lifecycle** — queue → JSONL → file upload → batch create → poll
+  → fetch results → resolve. Text uses it only for an explicit 24-hour window;
+  embeddings always use it with a 24-hour window.
 - **Same partial-result support** — `X-Incomplete` / `X-Last-Line` headers with `?offset=` query param
-- **Same intercepted endpoints** — `chat.completions.create()`, `embeddings.create()`
+- **Same intercepted endpoints** — `chat.completions.create()`,
+  `embeddings.create()`, `responses.create()`
 - **Same subclass contract** — `BatchOpenAI` extends the platform's OpenAI client (`AsyncOpenAI` in Python, `OpenAI` in TypeScript), passes `isinstance`/`instanceof` checks, and leaves all non-batched methods (files, batches, models, etc.) untouched
 
 If you change behaviour in one SDK, check whether the other needs the same change.
@@ -146,8 +151,9 @@ Tests are in `python/tests/` and use `pytest` with `pytest-asyncio`. They mock
 the OpenAI SDK's HTTP layer — no real API calls.
 
 ### TypeScript
-No tests yet. When adding tests, follow the same pattern: mock `fetch` or the
-OpenAI client methods, verify the queue → flush → resolve lifecycle.
+Tests are in `typescript/test/` and run with `npm test`. Mock only external
+OpenAI resources and verify both flex submit → poll → resolve and batch queue →
+flush → resolve lifecycles.
 
 ## Key files
 

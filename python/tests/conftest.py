@@ -80,7 +80,10 @@ def make_response_api_result(model: str = "gpt-4o", output_text: str = "Hello!")
             "input_tokens": 10,
             "output_tokens": 5,
             "total_tokens": 15,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {
+                "cached_tokens": 0,
+                "cache_write_tokens": 0,
+            },
             "output_tokens_details": {"reasoning_tokens": 0},
         },
         "parallel_tool_calls": True,
@@ -186,6 +189,8 @@ def client(mock_openai: AsyncMock) -> BatchOpenAI:
     c._batch_size = 3
     c._batch_window_seconds = 0.05
     c._poll_interval_seconds = 0.05
+    c._max_poll_retries = 5
+    c._flex_http_slots = asyncio.Semaphore(20)
     c._completion_window = "24h"
     c._batch_metadata = {}
     c._batch_event_handler = None
@@ -197,6 +202,11 @@ def client(mock_openai: AsyncMock) -> BatchOpenAI:
     c._window_tasks = {}
     c._active_batches = []
     c._poller_task = None
+    c._active_flex_tasks = set()
+    c._chat_api = AsyncMock()
+    c._chat_api.completions = AsyncMock()
+    c._embeddings_api = AsyncMock()
+    c._responses_api = AsyncMock()
     # Mock the internal httpx client that AsyncOpenAI.close() would call.
     # Since we skip __init__ via __new__, this isn't set up automatically.
     c._client = AsyncMock()
