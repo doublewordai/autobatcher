@@ -23,7 +23,7 @@ jobs:
       run:
         working-directory: python
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
@@ -55,7 +55,7 @@ jobs:
       run:
         working-directory: typescript
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
