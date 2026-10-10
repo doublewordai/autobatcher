@@ -62,7 +62,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       # npm trusted publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.
