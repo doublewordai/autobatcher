@@ -105,14 +105,12 @@ class TestFlexPolling:
                 "model": "test-model",
                 "input": "hello",
                 "frequency_penalty": 0.2,
-                "reasoning_effort": "medium",
                 "stop": ["DONE"],
             },
         )
 
         assert client._responses_api.create.await_args.kwargs["extra_body"] == {
             "frequency_penalty": 0.2,
-            "reasoning_effort": "medium",
             "stop": ["DONE"],
         }
 
@@ -214,6 +212,92 @@ class TestFlexPolling:
                 result_type=Response,
                 params={"model": "test-model", "input": "hello"},
             )
+
+
+@pytest.fixture
+async def flex_client():
+    client = BatchOpenAI(api_key="sk-test")
+    client._responses_api.create = AsyncMock(return_value=_response())
+    yield client
+    await client.close()
+
+
+class TestFlexReasoningControls:
+    @pytest.mark.parametrize(
+        ("params", "reasoning"),
+        [
+            ({"reasoning_effort": "medium"}, {"effort": "medium"}),
+            ({"extra_body": {"reasoning_effort": "none"}}, {"effort": "none"}),
+            (
+                {"reasoning_effort": "low", "reasoning": {"summary": "auto"}},
+                {"summary": "auto", "effort": "low"},
+            ),
+        ],
+    )
+    async def test_responses_reasoning_effort_becomes_reasoning_object(
+        self, flex_client: BatchOpenAI, params: dict, reasoning: dict
+    ) -> None:
+        """Regression: Doubleword refuses top-level reasoning_effort on /v1/responses."""
+        await flex_client.responses.create(model="test-model", input="hello", **params)
+
+        sent = flex_client._responses_api.create.await_args.kwargs
+        assert sent["reasoning"] == reasoning
+        assert "reasoning_effort" not in sent
+        assert "reasoning_effort" not in sent.get("extra_body", {})
+
+    async def test_responses_reasoning_effort_conflict_raises(
+        self, flex_client: BatchOpenAI
+    ) -> None:
+        with pytest.raises(ValueError, match="reasoning_effort conflicts"):
+            await flex_client.responses.create(
+                model="test-model",
+                input="hello",
+                reasoning={"effort": "high"},
+                reasoning_effort="low",
+            )
+        flex_client._responses_api.create.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "extension",
+        [
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            {"thinking": {"type": "disabled"}},
+            {"thinking_token_budget": 128},
+        ],
+        ids=lambda extension: next(iter(extension)),
+    )
+    @pytest.mark.parametrize("resource", ["chat", "responses"])
+    async def test_native_thinking_fields_raise_before_flex_submit(
+        self, flex_client: BatchOpenAI, resource: str, extension: dict
+    ) -> None:
+        """Regression: Doubleword refuses these on /v1/responses; fail before submitting."""
+        field = next(iter(extension))
+
+        with pytest.raises(ValueError, match=rf"{field} is not supported.*reasoning"):
+            if resource == "chat":
+                await flex_client.chat.completions.create(
+                    model="test-model",
+                    messages=[{"role": "user", "content": "hello"}],
+                    extra_body=extension,
+                )
+            else:
+                await flex_client.responses.create(
+                    model="test-model", input="hello", extra_body=extension
+                )
+        flex_client._responses_api.create.assert_not_awaited()
+
+    async def test_chat_reasoning_effort_reaches_flex_as_reasoning_object(
+        self, flex_client: BatchOpenAI
+    ) -> None:
+        await flex_client.chat.completions.create(
+            model="test-model",
+            messages=[{"role": "user", "content": "hello"}],
+            reasoning_effort="none",
+        )
+
+        sent = flex_client._responses_api.create.await_args.kwargs
+        assert sent["reasoning"] == {"effort": "none"}
+        assert "extra_body" not in sent
 
 
 class TestChatAdapters:

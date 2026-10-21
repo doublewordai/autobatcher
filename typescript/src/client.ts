@@ -27,6 +27,7 @@ import type {
 import {
   chatParamsToResponse,
   cleanParams,
+  normalizeResponseReasoning,
   responseToChatCompletion,
 } from "./translation.js";
 
@@ -396,7 +397,7 @@ export class BatchOpenAI extends OpenAI {
     const submitParams =
       endpoint === "/v1/chat/completions"
         ? chatParamsToResponse(params)
-        : cleanParams(params);
+        : normalizeResponseReasoning(cleanParams(params));
     if (endpoint !== "/v1/chat/completions" && endpoint !== "/v1/responses") {
       throw new Error(`Flex inference is not supported for ${endpoint}`);
     }

@@ -393,6 +393,108 @@ test("flex responses submit in background and poll to completion", async () => {
   }
 });
 
+function captureFlexSubmissions(client: BatchOpenAI) {
+  const createBodies: Array<Record<string, unknown>> = [];
+  (client as any)._responses = {
+    create: async (body: Record<string, unknown>) => {
+      createBodies.push(body);
+      return makeResponse("completed", "done");
+    },
+  };
+  return createBodies;
+}
+
+for (const [name, params, reasoning] of [
+  ["top-level", { reasoning_effort: "medium" }, { effort: "medium" }],
+  ["extra_body", { extra_body: { reasoning_effort: "none" } }, { effort: "none" }],
+  [
+    "merged with reasoning",
+    { reasoning_effort: "low", reasoning: { summary: "auto" } },
+    { summary: "auto", effort: "low" },
+  ],
+] as const) {
+  test(`flex responses map ${name} reasoning_effort to reasoning.effort`, async () => {
+    const client = makeClient();
+    const createBodies = captureFlexSubmissions(client);
+    try {
+      await client.responses.create({ model: "test-model", input: "hello", ...params } as any);
+      assert.deepEqual(createBodies[0].reasoning, reasoning);
+      assert.equal("reasoning_effort" in createBodies[0], false);
+    } finally {
+      await client.close();
+    }
+  });
+}
+
+test("flex responses reject conflicting reasoning_effort", async () => {
+  const client = makeClient();
+  const createBodies = captureFlexSubmissions(client);
+  try {
+    await assert.rejects(
+      client.responses.create({
+        model: "test-model",
+        input: "hello",
+        reasoning: { effort: "high" },
+        reasoning_effort: "low",
+      } as any),
+      /reasoning_effort conflicts/,
+    );
+    assert.deepEqual(createBodies, []);
+  } finally {
+    await client.close();
+  }
+});
+
+for (const extension of [
+  { chat_template_kwargs: { enable_thinking: false } },
+  { thinking: { type: "disabled" } },
+  { thinking_token_budget: 128 },
+]) {
+  const field = Object.keys(extension)[0];
+  for (const resource of ["chat", "responses"] as const) {
+    test(`flex ${resource} rejects ${field} before submitting`, async () => {
+      const client = makeClient();
+      const createBodies = captureFlexSubmissions(client);
+      try {
+        const request = resource === "chat"
+          ? client.chat.completions.create({
+              model: "test-model",
+              messages: [{ role: "user", content: "hello" }],
+              extra_body: extension,
+            } as any)
+          : client.responses.create({
+              model: "test-model",
+              input: "hello",
+              extra_body: extension,
+            } as any);
+        await assert.rejects(
+          request,
+          new RegExp(`${field} is not supported.*reasoning`),
+        );
+        assert.deepEqual(createBodies, []);
+      } finally {
+        await client.close();
+      }
+    });
+  }
+}
+
+test("flex chat sends reasoning_effort as reasoning.effort", async () => {
+  const client = makeClient();
+  const createBodies = captureFlexSubmissions(client);
+  try {
+    await client.chat.completions.create({
+      model: "test-model",
+      messages: [{ role: "user", content: "hello" }],
+      reasoning_effort: "none" as any,
+    });
+    assert.deepEqual(createBodies[0].reasoning, { effort: "none" });
+    assert.equal("reasoning_effort" in createBodies[0], false);
+  } finally {
+    await client.close();
+  }
+});
+
 test("flex forwards per-request transport options to create and polls", async () => {
   const client = makeClient();
   const calls: Array<{ operation: string; options: unknown }> = [];

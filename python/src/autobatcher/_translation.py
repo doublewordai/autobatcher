@@ -306,6 +306,37 @@ def _reject_unsupported(params: dict[str, Any]) -> None:
     if modalities is not None and list(modalities) != ["text"]:
         raise ValueError("modalities supports text output only in flex Responses translation")
 
+    _reject_native_thinking(params, "reasoning_effort")
+
+
+# Provider-native thinking controls that Doubleword refuses on /v1/responses.
+_NATIVE_THINKING_FIELDS = ("chat_template_kwargs", "thinking", "thinking_token_budget")
+
+
+def _reject_native_thinking(params: dict[str, Any], replacement: str) -> None:
+    for key in _NATIVE_THINKING_FIELDS:
+        if params.get(key) is not None:
+            raise ValueError(
+                f"{key} is not supported by flex Responses requests; "
+                f"use {replacement} to control reasoning"
+            )
+
+
+def normalize_response_reasoning(params: dict[str, Any]) -> dict[str, Any]:
+    """Move a Chat-style ``reasoning_effort`` into Responses ``reasoning.effort``."""
+    _reject_native_thinking(params, "reasoning={'effort': ...}")
+    result = dict(params)
+    effort = result.pop("reasoning_effort", None)
+    if effort is None:
+        return result
+    reasoning = result.get("reasoning") or {}
+    if not isinstance(reasoning, dict):
+        raise ValueError("reasoning is invalid")
+    if reasoning.get("effort") not in (None, effort):
+        raise ValueError("reasoning_effort conflicts with reasoning.effort")
+    result["reasoning"] = {**reasoning, "effort": effort}
+    return result
+
 
 def chat_params_to_response(
     params: CompletionCreateParamsNonStreaming,

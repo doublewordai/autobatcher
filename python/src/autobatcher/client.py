@@ -33,7 +33,11 @@ from openai.types.chat.completion_create_params import (
     CompletionCreateParamsNonStreaming,
 )
 
-from ._translation import chat_params_to_response, response_to_chat_completion
+from ._translation import (
+    chat_params_to_response,
+    normalize_response_reasoning,
+    response_to_chat_completion,
+)
 
 # Sentinel types the openai SDK uses for "not provided" parameters.
 # Both are non-JSON-serializable and must be stripped before batching.
@@ -696,7 +700,7 @@ class BatchOpenAI(AsyncOpenAI):
         if endpoint == "/v1/chat/completions":
             submit_params = _chat_params_to_response(params)
         elif endpoint == "/v1/responses":
-            submit_params = body_params
+            submit_params = normalize_response_reasoning(body_params)
             submit_params.pop("stream_options", None)
             submit_params["stream"] = False
         else:
