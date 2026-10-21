@@ -14,5 +14,5 @@ Usage:
 
 from .client import AsyncOpenAI, BatchOpenAI, FlexPollingError
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 __all__ = ["AsyncOpenAI", "BatchOpenAI", "FlexPollingError"]
