@@ -339,6 +339,45 @@ function rejectUnsupported(
       "modalities supports text output only in flex Responses translation",
     );
   }
+  rejectNativeThinking(params, "reasoning_effort");
+}
+
+/** Provider-native thinking controls that Doubleword refuses on /v1/responses. */
+const NATIVE_THINKING_FIELDS = [
+  "chat_template_kwargs",
+  "thinking",
+  "thinking_token_budget",
+] as const;
+
+function rejectNativeThinking(
+  params: Record<string, unknown>,
+  replacement: string,
+): void {
+  for (const key of NATIVE_THINKING_FIELDS) {
+    if (params[key] != null) {
+      throw new Error(
+        `${key} is not supported by flex Responses requests; ` +
+          `use ${replacement} to control reasoning`,
+      );
+    }
+  }
+}
+
+/** Move a Chat-style `reasoning_effort` into Responses `reasoning.effort`. */
+export function normalizeResponseReasoning(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  rejectNativeThinking(params, "reasoning: { effort: ... }");
+  const { reasoning_effort: effort, ...result } = params;
+  if (effort == null) return result;
+  const reasoning = result.reasoning == null
+    ? {}
+    : record(result.reasoning, "reasoning");
+  if (reasoning.effort != null && reasoning.effort !== effort) {
+    throw new Error("reasoning_effort conflicts with reasoning.effort");
+  }
+  result.reasoning = { ...reasoning, effort };
+  return result;
 }
 
 export function chatParamsToResponse(
