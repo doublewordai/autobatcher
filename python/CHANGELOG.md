@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.12.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.11.0...autobatcher-v0.12.0) (2026-10-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* flex chat.completions.create and responses.create now raise before submitting when the request carries chat_template_kwargs, thinking or thinking_token_budget, or a reasoning_effort that conflicts with reasoning.effort. These were previously sent and silently ignored. Use reasoning_effort (chat) or reasoning={"effort": ...} (Responses) instead.
+
+### Bug Fixes
+
+* send reasoning_effort as reasoning.effort on flex Responses requests ([#54](https://github.com/doublewordai/autobatcher/issues/54)) ([0d270e7](https://github.com/doublewordai/autobatcher/commit/0d270e73de84b5c34b7ad92b4ee41c9fd5393e55))
+
 ## [0.11.0](https://github.com/doublewordai/autobatcher/compare/autobatcher-v0.10.0...autobatcher-v0.11.0) (2026-09-23)
 
 
