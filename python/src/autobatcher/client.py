@@ -805,22 +805,6 @@ class BatchOpenAI(AsyncOpenAI):
         # Take all pending requests
         self._pending[endpoint] = []
 
-        # Create JSONL content — each line uses the request's own endpoint
-        lines = []
-        for req in requests:
-            body = _clean_params(req.params)
-            body.pop("stream_options", None)
-            if req.endpoint != "/v1/embeddings":
-                body["stream"] = False
-            line = {
-                "custom_id": req.custom_id,
-                "method": "POST",
-                "url": req.endpoint,
-                "body": body,
-            }
-            lines.append(json.dumps(line))
-        content = "\n".join(lines)
-
         # Use the first request's endpoint for the top-level batches.create() call
         top_level_endpoint = requests[0].endpoint
         batch_completion_window = "24h"
@@ -837,6 +821,23 @@ class BatchOpenAI(AsyncOpenAI):
         }))
 
         try:
+            # Keep serialization inside the failure handler: these requests
+            # have already been removed from the pending queue.
+            lines = []
+            for req in requests:
+                body = _clean_params(req.params)
+                body.pop("stream_options", None)
+                if req.endpoint != "/v1/embeddings":
+                    body["stream"] = False
+                line = {
+                    "custom_id": req.custom_id,
+                    "method": "POST",
+                    "url": req.endpoint,
+                    "body": body,
+                }
+                lines.append(json.dumps(line))
+            content = "\n".join(lines)
+
             # Upload the batch file (retry on rate limit)
             file_obj = io.BytesIO(content.encode("utf-8"))
             filename = f"batch-{uuid.uuid4()}.jsonl"
