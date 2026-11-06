@@ -61,6 +61,38 @@ def _add_pending(
 
 
 class TestSubmitBatch:
+    @pytest.mark.parametrize("submit_from_timer", [False, True])
+    @pytest.mark.parametrize("circular", [False, True])
+    async def test_serialization_failure_rejects_every_request(
+        self, client: BatchOpenAI, submit_from_timer: bool, circular: bool
+    ) -> None:
+        reqs = _add_pending(client, 2)
+        invalid = {}
+        if circular:
+            invalid["self"] = invalid
+        else:
+            invalid["value"] = object()
+        reqs[1].params["extra_body"] = invalid
+        events = []
+        client._batch_event_handler = events.append
+        client._batch_window_seconds = 0
+
+        if submit_from_timer:
+            await client._window_timer(EP)
+        else:
+            await client._submit_batch(EP)
+
+        for req in reqs:
+            assert req.future.done()
+            with pytest.raises(ValueError if circular else TypeError):
+                req.future.result()
+        client.files.create.assert_not_awaited()
+        client.batches.create.assert_not_awaited()
+        assert client._pending[EP] == []
+        assert len(events) == 1
+        assert events[0]["event"] == "batch_submission_failed"
+        assert events[0]["request_count"] == 2
+
     async def test_jsonl_format(self, client: BatchOpenAI) -> None:
         """Each JSONL line must have custom_id, method, url, and body."""
         reqs = _add_pending(client, 2)
