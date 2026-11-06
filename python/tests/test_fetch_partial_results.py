@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from openai.types.chat import ChatCompletion
 from openai.types import CreateEmbeddingResponse
@@ -34,6 +36,37 @@ def _httpx_response(
 
 
 class TestFetchPartialResults:
+    @pytest.mark.parametrize("status_code", [200, 400, 429, 500])
+    async def test_bad_result_does_not_discard_later_success(
+        self, client: BatchOpenAI, status_code: int
+    ) -> None:
+        ab = make_active_batch(["bad", "good"])
+        bad = json.loads(make_batch_result_line("bad"))
+        bad["response"]["status_code"] = status_code
+        if status_code == 200:
+            bad["response"]["body"] = {}
+        body = "\n".join([
+            json.dumps(bad),
+            make_batch_result_line("good", "valid answer"),
+        ])
+        client._http_client.get = AsyncMock(
+            return_value=_httpx_response(
+                body, {"X-Incomplete": "false", "X-Last-Line": "2"}
+            )
+        )
+
+        more = await client._fetch_partial_results(ab, "file-out")
+
+        assert not more
+        assert ab.requests["bad"].future.done()
+        expected_error = ValidationError if status_code == 200 else RuntimeError
+        with pytest.raises(expected_error) as error:
+            ab.requests["bad"].future.result()
+        if status_code != 200:
+            assert f"status {status_code}" in str(error.value)
+        assert ab.requests["good"].future.result().choices[0].message.content == "valid answer"
+        assert ab.last_offset == 2
+
     async def test_partial_results_resolve_futures(
         self, client: BatchOpenAI
     ) -> None:

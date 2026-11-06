@@ -1099,11 +1099,22 @@ class BatchOpenAI(AsyncOpenAI):
                             req.future.set_exception(
                                 Exception(f"Request {custom_id} failed: {error_data}")
                             )
+                        elif response_data.get("status_code", 200) >= 400:
+                            req.future.set_exception(
+                                RuntimeError(
+                                    f"Batch request returned status {response_data['status_code']}: "
+                                    f"{response_data.get('body', {})}"
+                                )
+                            )
                         else:
                             response_body = response_data.get("body", {})
                             result_type = batch.result_types.get(custom_id, ChatCompletion)
-                            parsed = result_type.model_validate(response_body)
-                            req.future.set_result(parsed)
+                            try:
+                                parsed = result_type.model_validate(response_body)
+                            except Exception as exc:
+                                req.future.set_exception(exc)
+                            else:
+                                req.future.set_result(parsed)
                         resolved += 1
 
             # Update offset for next fetch
