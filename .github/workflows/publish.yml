@@ -23,23 +23,23 @@ jobs:
       run:
         working-directory: python
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
       - name: Install build dependencies
-        run: pip install build
+        run: pip install build==1.6.1
 
       - name: Build package
         run: python -m build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: python/dist
 
@@ -55,19 +55,19 @@ jobs:
       run:
         working-directory: typescript
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       # npm trusted publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.
       - name: Update npm
-        run: npm install -g npm@latest
+        run: npm install -g npm@12.2.3
 
       - name: Install dependencies
         run: npm ci
